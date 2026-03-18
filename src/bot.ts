@@ -1,47 +1,154 @@
-import { Telegraf } from 'telegraf';
+import { Telegraf, Context } from 'telegraf';
+import type { Message, CallbackQuery } from 'telegraf/types';
 import { config } from './config';
-import { getMapping, getTopic, getTopicByTopicId, deleteTopic } from './database';
-import { createMessage, createMessageWithAttachment, toggleConversationStatus } from './chatwoot';
+import { getMapping, getTopic, getTopicByTopicId } from './database';
+import {
+    createMessage,
+    createMessageWithAttachment,
+    toggleConversationStatus,
+    toggleTypingStatus,
+    getCannedResponses,
+} from './chatwoot';
+import { createLogger } from './logger';
+
+const log = createLogger('bot');
 
 export const bot = new Telegraf(config.telegramToken);
 
-// ============ 文本消息处理（回复客户） ============
+// ============ Helpers ============
+
+type TextMessage = Message.TextMessage;
+type PhotoMessage = Message.PhotoMessage;
+type DocumentMessage = Message.DocumentMessage;
+type VideoMessage = Message.VideoMessage;
+type AudioMessage = Message.AudioMessage;
+type VoiceMessage = Message.VoiceMessage;
+type VideoNoteMessage = Message.VideoNoteMessage;
+type StickerMessage = Message.StickerMessage;
+type AnimationMessage = Message.AnimationMessage;
+
+function isFromForum(ctx: Context): boolean {
+    return !!config.telegramForumChatId && ctx.chat?.id.toString() === config.telegramForumChatId;
+}
+
+function isAdmin(ctx: Context): boolean {
+    return ctx.from?.id.toString() === config.telegramAdminId;
+}
+
+/**
+ * Resolve the Chatwoot conversation ID from either forum topic or reply context.
+ * Returns null if no mapping found.
+ */
+function resolveConversationId(ctx: Context & { message?: Message }): number | null {
+    if (isFromForum(ctx)) {
+        const threadId = (ctx.message as Message & { message_thread_id?: number })?.message_thread_id;
+        if (threadId) {
+            const mapping = getTopicByTopicId(threadId);
+            return mapping ? mapping.chatwoot_conversation_id : null;
+        }
+        return null;
+    }
+
+    if (!isAdmin(ctx)) return null;
+    const replyTo = (ctx.message as Message & { reply_to_message?: Message })?.reply_to_message;
+    if (!replyTo) return null;
+    const mapping = getMapping(replyTo.message_id);
+    return mapping ? mapping.chatwoot_conversation_id : null;
+}
+
+// ============ /canned Command ============
+
+const CANNED_PAGE_SIZE = 8;
+
+bot.command('canned', async (ctx) => {
+    const conversationId = resolveConversationId(ctx);
+    if (!conversationId) {
+        await ctx.reply('请在对话话题中使用此命令，或回复一条客户消息。');
+        return;
+    }
+
+    try {
+        const searchTerm = ctx.message.text.replace(/^\/canned\s*/, '').trim() || undefined;
+        const responses = await getCannedResponses(searchTerm);
+
+        if (responses.length === 0) {
+            await ctx.reply(searchTerm ? `未找到匹配 "${searchTerm}" 的预设回复。` : '暂无预设回复。');
+            return;
+        }
+
+        await sendCannedResponsePage(ctx, responses, 0, conversationId);
+    } catch (error) {
+        log.error('Failed to fetch canned responses', { error: String(error) });
+        await ctx.reply('获取预设回复失败，请检查日志。');
+    }
+});
+
+function buildCannedKeyboard(responses: Array<{ id: number; short_code: string }>, page: number, conversationId: number) {
+    const start = page * CANNED_PAGE_SIZE;
+    const pageItems = responses.slice(start, start + CANNED_PAGE_SIZE);
+    const totalPages = Math.ceil(responses.length / CANNED_PAGE_SIZE);
+
+    const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (let i = 0; i < pageItems.length; i += 2) {
+        const row: Array<{ text: string; callback_data: string }> = [];
+        row.push({ text: `💬 ${pageItems[i].short_code}`, callback_data: `canned:${pageItems[i].id}:${conversationId}` });
+        if (i + 1 < pageItems.length) {
+            row.push({ text: `💬 ${pageItems[i + 1].short_code}`, callback_data: `canned:${pageItems[i + 1].id}:${conversationId}` });
+        }
+        rows.push(row);
+    }
+
+    if (totalPages > 1) {
+        const navRow: Array<{ text: string; callback_data: string }> = [];
+        if (page > 0) navRow.push({ text: '⬅️ 上一页', callback_data: `canned_page:${page - 1}:${conversationId}` });
+        navRow.push({ text: `📄 ${page + 1}/${totalPages}`, callback_data: 'noop' });
+        if (start + CANNED_PAGE_SIZE < responses.length) navRow.push({ text: '➡️ 下一页', callback_data: `canned_page:${page + 1}:${conversationId}` });
+        rows.push(navRow);
+    }
+
+    rows.push([{ text: '❌ 关闭', callback_data: 'canned_close' }]);
+
+    return { inline_keyboard: rows };
+}
+
+async function sendCannedResponsePage(ctx: Context, responses: Array<{ id: number; short_code: string; content: string }>, page: number, conversationId: number) {
+    const keyboard = buildCannedKeyboard(responses, page, conversationId);
+    const text = `📋 **预设回复** (共 ${responses.length} 条)\n选择要发送的回复：`;
+
+    await ctx.reply(text, {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+    });
+}
+
+// ============ Text Message Handler ============
 
 bot.on('text', async (ctx) => {
-    const fromId = ctx.from.id.toString();
-    const messageText = ctx.message.text;
+    const msg = ctx.message as TextMessage;
 
-    // Forum 模式：检查是否来自 Forum 群组
-    const isFromForum = config.telegramForumChatId && ctx.chat.id.toString() === config.telegramForumChatId;
+    // Skip bot commands (already handled above)
+    if (msg.text.startsWith('/')) return;
 
-    // 原有模式：仅限 Admin
-    if (!isFromForum && fromId !== config.telegramAdminId) {
-        return;
-    }
+    if (isFromForum(ctx)) {
+        const threadId = msg.message_thread_id;
+        if (!threadId) return;
 
-    // Forum 模式：在话题中的消息转发到 Chatwoot
-    if (isFromForum) {
-        const threadId = ctx.message.message_thread_id;
-        if (threadId) {
-            const topicMapping = getTopicByTopicId(threadId);
-            if (topicMapping) {
-                // 普通消息：发送到 Chatwoot
-                try {
-                    await createMessage(topicMapping.chatwoot_conversation_id, messageText);
-                    // 静默成功，减少噪音
-                } catch (error) {
-                    console.error('Failed to send message to Chatwoot:', error);
-                    await ctx.reply('发送消息到 Chatwoot 失败，请检查日志。');
-                }
-                return;
-            }
+        const topicMapping = getTopicByTopicId(threadId);
+        if (!topicMapping) return;
+
+        try {
+            void toggleTypingStatus(topicMapping.chatwoot_conversation_id, 'on');
+            await createMessage(topicMapping.chatwoot_conversation_id, msg.text);
+        } catch (error) {
+            log.error('Failed to send message to Chatwoot', { error: String(error) });
+            await ctx.reply('发送消息到 Chatwoot 失败，请检查日志。');
         }
-        // 非话题消息（如一般消息区），忽略
         return;
     }
 
-    // 原有模式：必须回复消息
-    const replyTo = ctx.message.reply_to_message;
+    if (!isAdmin(ctx)) return;
+
+    const replyTo = msg.reply_to_message;
     if (!replyTo) {
         await ctx.reply('请回复客户消息来发送回复。');
         return;
@@ -54,126 +161,187 @@ bot.on('text', async (ctx) => {
     }
 
     try {
-        await createMessage(mapping.chatwoot_conversation_id, messageText);
-        // 静默成功
+        void toggleTypingStatus(mapping.chatwoot_conversation_id, 'on');
+        await createMessage(mapping.chatwoot_conversation_id, msg.text);
     } catch (error) {
-        console.error('Failed to send message to Chatwoot:', error);
+        log.error('Failed to send message to Chatwoot', { error: String(error) });
         await ctx.reply('发送消息到 Chatwoot 失败，请检查日志。');
     }
 });
 
-// ============ 按钮回调处理 ============
+// ============ Callback Query Handler ============
 
 bot.on('callback_query', async (ctx) => {
-    // @ts-ignore
-    const data = ctx.callbackQuery.data as string;
-    // @ts-ignore
-    const messageId = ctx.callbackQuery.message?.message_id;
-
+    const cbQuery = ctx.callbackQuery as CallbackQuery.DataQuery;
+    const data = cbQuery.data;
     if (!data) return;
 
-    // Forum 模式：resolve:conversationId:accountId
+    // Canned response: send selected response to conversation
+    if (data.startsWith('canned:')) {
+        const parts = data.split(':');
+        const responseId = parseInt(parts[1], 10);
+        const conversationId = parseInt(parts[2], 10);
+
+        if (!responseId || !conversationId) {
+            await ctx.answerCbQuery('参数错误');
+            return;
+        }
+
+        try {
+            const responses = await getCannedResponses();
+            const selected = responses.find(r => r.id === responseId);
+            if (!selected) {
+                await ctx.answerCbQuery('预设回复已不存在');
+                return;
+            }
+
+            void toggleTypingStatus(conversationId, 'on');
+            await createMessage(conversationId, selected.content);
+            await ctx.answerCbQuery(`✅ 已发送: ${selected.short_code}`);
+
+            try {
+                await ctx.editMessageText(
+                    `✅ 已发送预设回复 **${selected.short_code}**\n\n> ${selected.content.substring(0, 200)}${selected.content.length > 200 ? '...' : ''}`,
+                    { parse_mode: 'Markdown' },
+                );
+            } catch {
+                // edit may fail if message is too old
+            }
+        } catch (error) {
+            log.error('Failed to send canned response', { responseId, conversationId, error: String(error) });
+            await ctx.answerCbQuery('❌ 发送失败，请重试');
+        }
+        return;
+    }
+
+    // Canned pagination
+    if (data.startsWith('canned_page:')) {
+        const parts = data.split(':');
+        const page = parseInt(parts[1], 10);
+        const conversationId = parseInt(parts[2], 10);
+
+        try {
+            const responses = await getCannedResponses();
+            const keyboard = buildCannedKeyboard(responses, page, conversationId);
+            const text = `📋 **预设回复** (共 ${responses.length} 条)\n选择要发送的回复：`;
+            await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+            await ctx.answerCbQuery();
+        } catch (error) {
+            log.error('Failed to paginate canned responses', { error: String(error) });
+            await ctx.answerCbQuery('加载失败');
+        }
+        return;
+    }
+
+    // Close canned response menu
+    if (data === 'canned_close') {
+        try {
+            await ctx.deleteMessage();
+        } catch {
+            try { await ctx.editMessageText('已关闭'); } catch { /* ignore */ }
+        }
+        await ctx.answerCbQuery();
+        return;
+    }
+
+    // Noop (page indicator button)
+    if (data === 'noop') {
+        await ctx.answerCbQuery();
+        return;
+    }
+
+    // Forum mode: resolve conversation
     if (data.startsWith('resolve:')) {
         const parts = data.split(':');
         const conversationId = parseInt(parts[1], 10);
         const accountId = parseInt(parts[2], 10);
 
-        if (conversationId) {
+        if (!conversationId) return;
+
+        try {
+            await toggleConversationStatus(conversationId, 'resolved');
+            await ctx.answerCbQuery('✅ 会话已标记为已解决，话题将自动关闭！');
+
+            const messageText = (cbQuery.message as Message.TextMessage)?.text || '';
+            const cleanText = messageText.replace(/\n\n[✅🔓] \*\*状态：.*\*\*$/, '');
+            const updatedText = cleanText + '\n\n✅ **状态：已解决**';
+
             try {
-                await toggleConversationStatus(conversationId, 'resolved');
-                await ctx.answerCbQuery('✅ 会话已标记为已解决，话题将自动关闭！');
-
-                // 更新控制面板，显示已解决状态（保留按钮以便重新打开）
-                // @ts-ignore
-                const messageText = ctx.callbackQuery.message?.text || '';
-                // 移除之前可能存在的状态后缀，然后添加新状态
-                const cleanText = messageText.replace(/\n\n[✅🔓] \*\*状态：.*\*\*$/, '');
-                const updatedText = cleanText + '\n\n✅ **状态：已解决**';
-
-                try {
-                    await ctx.editMessageText(updatedText, {
-                        parse_mode: 'Markdown',
-                        reply_markup: {
-                            inline_keyboard: [
-                                [
-                                    { text: '✅ 标记已解决', callback_data: `resolve:${conversationId}:${accountId}` },
-                                    { text: '🔓 重新打开', callback_data: `reopen:${conversationId}:${accountId}` },
-                                ],
-                                [
-                                    { text: '📱 在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` },
-                                ],
+                await ctx.editMessageText(updatedText, {
+                    parse_mode: 'Markdown',
+                    reply_markup: {
+                        inline_keyboard: [
+                            [
+                                { text: '✅ 标记已解决', callback_data: `resolve:${conversationId}:${accountId}` },
+                                { text: '🔓 重新打开', callback_data: `reopen:${conversationId}:${accountId}` },
                             ],
-                        },
-                    });
-                } catch (err) {
-                    // 如果编辑失败（消息内容相同），忽略错误
-                    console.debug('控制面板更新失败（可能内容相同）');
-                }
-
-                // 话题关闭由 webhook 的 conversation_status_changed 事件处理
-            } catch (error) {
-                console.error('Failed to resolve conversation:', error);
-                await ctx.answerCbQuery('❌ 操作失败，请重试');
+                            [
+                                { text: '📱 在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` },
+                            ],
+                        ],
+                    },
+                });
+            } catch {
+                log.debug('Failed to update control panel (content may be identical)');
             }
+        } catch (error) {
+            log.error('Failed to resolve conversation', { conversationId, error: String(error) });
+            await ctx.answerCbQuery('❌ 操作失败，请重试');
         }
         return;
     }
 
-    // Forum 模式：reopen:conversationId:accountId - 重新打开对话
+    // Forum mode: reopen conversation
     if (data.startsWith('reopen:')) {
         const parts = data.split(':');
         const conversationId = parseInt(parts[1], 10);
         const accountId = parseInt(parts[2], 10);
 
-        if (conversationId) {
-            try {
-                await toggleConversationStatus(conversationId, 'open');
-                await ctx.answerCbQuery('🔓 对话已重新打开！');
+        if (!conversationId) return;
 
-                // 重新打开 Forum Topic（如果已关闭）
-                const topic = getTopic(conversationId);
-                if (topic && config.telegramForumChatId) {
-                    try {
-                        await bot.telegram.reopenForumTopic(config.telegramForumChatId, topic.telegram_topic_id);
-                        console.log(`重新打开话题 (topic_id: ${topic.telegram_topic_id})`);
-                    } catch (err) {
-                        // 话题可能本来就是打开的，忽略错误
-                        console.debug('重新打开话题失败（可能已经是打开状态）:', err);
-                    }
-                }
+        try {
+            await toggleConversationStatus(conversationId, 'open');
+            await ctx.answerCbQuery('🔓 对话已重新打开！');
 
-                // 更新控制面板，显示打开状态
-                // @ts-ignore
-                const messageText = ctx.callbackQuery.message?.text || '';
-                const updatedText = messageText.replace(/\n\n✅ \*\*状态：已解决\*\*$/, '') + '\n\n🔓 **状态：进行中**';
-
+            const topic = getTopic(conversationId);
+            if (topic && config.telegramForumChatId) {
                 try {
-                    await ctx.editMessageText(updatedText, {
-                        parse_mode: 'Markdown',
-                        reply_markup: {
-                            inline_keyboard: [
-                                [
-                                    { text: '✅ 标记已解决', callback_data: `resolve:${conversationId}:${accountId}` },
-                                    { text: '🔓 重新打开', callback_data: `reopen:${conversationId}:${accountId}` },
-                                ],
-                                [
-                                    { text: '📱 在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` },
-                                ],
-                            ],
-                        },
-                    });
-                } catch (err) {
-                    console.debug('控制面板更新失败（可能内容相同）');
+                    await bot.telegram.reopenForumTopic(config.telegramForumChatId, topic.telegram_topic_id);
+                    log.info('Reopened forum topic', { conversationId, topicId: topic.telegram_topic_id });
+                } catch {
+                    log.debug('Failed to reopen topic (may already be open)');
                 }
-            } catch (error) {
-                console.error('Failed to reopen conversation:', error);
-                await ctx.answerCbQuery('❌ 操作失败，请重试');
             }
+
+            const messageText = (cbQuery.message as Message.TextMessage)?.text || '';
+            const updatedText = messageText.replace(/\n\n✅ \*\*状态：已解决\*\*$/, '') + '\n\n🔓 **状态：进行中**';
+
+            try {
+                await ctx.editMessageText(updatedText, {
+                    parse_mode: 'Markdown',
+                    reply_markup: {
+                        inline_keyboard: [
+                            [
+                                { text: '✅ 标记已解决', callback_data: `resolve:${conversationId}:${accountId}` },
+                                { text: '🔓 重新打开', callback_data: `reopen:${conversationId}:${accountId}` },
+                            ],
+                            [
+                                { text: '📱 在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` },
+                            ],
+                        ],
+                    },
+                });
+            } catch {
+                log.debug('Failed to update control panel (content may be identical)');
+            }
+        } catch (error) {
+            log.error('Failed to reopen conversation', { conversationId, error: String(error) });
+            await ctx.answerCbQuery('❌ 操作失败，请重试');
         }
         return;
     }
 
-    // Forum 模式：close_topic:conversationId
+    // Forum mode: close topic
     if (data.startsWith('close_topic:')) {
         const conversationId = parseInt(data.split(':')[1], 10);
         const topic = getTopic(conversationId);
@@ -182,9 +350,9 @@ bot.on('callback_query', async (ctx) => {
             try {
                 await bot.telegram.closeForumTopic(config.telegramForumChatId, topic.telegram_topic_id);
                 await ctx.answerCbQuery('话题已关闭！🔒');
-                console.log(`手动关闭话题: ${topic.topic_name}`);
+                log.info('Manually closed topic', { conversationId, topicName: topic.topic_name });
             } catch (error) {
-                console.error('Failed to close topic:', error);
+                log.error('Failed to close topic', { conversationId, error: String(error) });
                 await ctx.answerCbQuery('关闭话题失败。');
             }
         } else {
@@ -193,8 +361,11 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
 
-    // 原有模式：resolve（无参数）
-    if (data === 'resolve' && messageId) {
+    // Legacy mode: resolve (no params)
+    if (data === 'resolve') {
+        const messageId = cbQuery.message?.message_id;
+        if (!messageId) return;
+
         const mapping = getMapping(messageId);
         if (mapping) {
             try {
@@ -203,7 +374,7 @@ bot.on('callback_query', async (ctx) => {
                 await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
                 await ctx.reply(`会话 #${mapping.chatwoot_conversation_id} 已标记为已解决。`);
             } catch (error) {
-                console.error('Failed to resolve conversation:', error);
+                log.error('Failed to resolve conversation', { error: String(error) });
                 await ctx.answerCbQuery('解决失败。');
             }
         } else {
@@ -213,224 +384,99 @@ bot.on('callback_query', async (ctx) => {
     }
 });
 
-// ============ 媒体消息处理（图片、文件、视频、音频等） ============
+// ============ Media Message Handlers ============
 
-/**
- * 下载 Telegram 文件并返回 Buffer
- */
 async function downloadTelegramFile(fileId: string): Promise<{ buffer: Buffer; filePath: string }> {
     const file = await bot.telegram.getFile(fileId);
     const filePath = file.file_path;
-    if (!filePath) {
-        throw new Error('无法获取文件路径');
-    }
+    if (!filePath) throw new Error('无法获取文件路径');
 
     const fileUrl = `https://api.telegram.org/file/bot${config.telegramToken}/${filePath}`;
     const response = await fetch(fileUrl);
-    if (!response.ok) {
-        throw new Error(`下载文件失败: ${response.status} ${response.statusText}`);
-    }
+    if (!response.ok) throw new Error(`下载文件失败: ${response.status} ${response.statusText}`);
 
     const arrayBuffer = await response.arrayBuffer();
     return { buffer: Buffer.from(arrayBuffer), filePath };
 }
 
-/**
- * 获取对话 ID（根据 Forum 模式或原有模式）
- */
-function getConversationId(ctx: any): number | null {
-    const fromId = ctx.from.id.toString();
-    const isFromForum = config.telegramForumChatId && ctx.chat.id.toString() === config.telegramForumChatId;
-
-    if (isFromForum) {
-        const threadId = ctx.message?.message_thread_id;
-        if (threadId) {
-            const topicMapping = getTopicByTopicId(threadId);
-            if (topicMapping) {
-                return topicMapping.chatwoot_conversation_id;
-            }
-        }
-        return null;
-    }
-
-    // 原有模式：仅限 Admin，必须回复消息
-    if (fromId !== config.telegramAdminId) {
-        return null;
-    }
-
-    const replyTo = ctx.message?.reply_to_message;
-    if (!replyTo) {
-        return null;
-    }
-
-    const mapping = getMapping(replyTo.message_id);
-    return mapping ? mapping.chatwoot_conversation_id : null;
-}
-
-/**
- * 处理媒体消息的通用函数
- */
 async function handleMediaMessage(
-    ctx: any,
+    ctx: Context,
     fileId: string,
     filename: string,
     mimeType: string | undefined,
-    caption?: string
+    caption?: string,
 ) {
-    const conversationId = getConversationId(ctx);
-    
+    const conversationId = resolveConversationId(ctx);
     if (!conversationId) {
-        // Forum 模式下静默忽略，原有模式下提示
-        const fromId = ctx.from.id.toString();
-        const isFromForum = config.telegramForumChatId && ctx.chat.id.toString() === config.telegramForumChatId;
-        if (!isFromForum && fromId === config.telegramAdminId && !ctx.message?.reply_to_message) {
+        if (!isFromForum(ctx) && isAdmin(ctx) && !(ctx.message as Message & { reply_to_message?: Message })?.reply_to_message) {
             await ctx.reply('请回复客户消息来发送附件。');
         }
         return;
     }
 
     try {
+        void toggleTypingStatus(conversationId, 'on');
         const { buffer, filePath } = await downloadTelegramFile(fileId);
-        
-        // 如果没有指定文件名，从路径中提取
         const finalFilename = filename || filePath.split('/').pop() || `file_${Date.now()}`;
-        
+
         await createMessageWithAttachment(conversationId, caption || '', {
             buffer,
             filename: finalFilename,
             mimeType,
         });
-        
-        console.log(`附件已发送到 Chatwoot (conversation: ${conversationId}, file: ${finalFilename})`);
+        log.info('Attachment sent to Chatwoot', { conversationId, filename: finalFilename });
     } catch (error) {
-        console.error('Failed to send attachment to Chatwoot:', error);
+        log.error('Failed to send attachment to Chatwoot', { conversationId, error: String(error) });
         await ctx.reply('发送附件到 Chatwoot 失败，请检查日志。');
     }
 }
 
-// 处理图片消息
-// @ts-ignore - Telegraf types
 bot.on('photo', async (ctx) => {
-    // 获取最高分辨率的图片
-    const photos = ctx.message.photo;
+    const msg = ctx.message as PhotoMessage;
+    const photos = msg.photo;
     const photo = photos[photos.length - 1];
-    const caption = ctx.message.caption || '';
-    
-    await handleMediaMessage(
-        ctx,
-        photo.file_id,
-        `photo_${Date.now()}.jpg`,
-        'image/jpeg',
-        caption
-    );
+    await handleMediaMessage(ctx, photo.file_id, `photo_${Date.now()}.jpg`, 'image/jpeg', msg.caption || '');
 });
 
-// 处理文档/文件消息
-// @ts-ignore - Telegraf types
 bot.on('document', async (ctx) => {
-    const doc = ctx.message.document;
-    const caption = ctx.message.caption || '';
-    
-    await handleMediaMessage(
-        ctx,
-        doc.file_id,
-        doc.file_name || `document_${Date.now()}`,
-        doc.mime_type,
-        caption
-    );
+    const msg = ctx.message as DocumentMessage;
+    const doc = msg.document;
+    await handleMediaMessage(ctx, doc.file_id, doc.file_name || `document_${Date.now()}`, doc.mime_type, msg.caption || '');
 });
 
-// 处理视频消息
-// @ts-ignore - Telegraf types
 bot.on('video', async (ctx) => {
-    const video = ctx.message.video;
-    const caption = ctx.message.caption || '';
-    
-    await handleMediaMessage(
-        ctx,
-        video.file_id,
-        video.file_name || `video_${Date.now()}.mp4`,
-        video.mime_type || 'video/mp4',
-        caption
-    );
+    const msg = ctx.message as VideoMessage;
+    const video = msg.video;
+    await handleMediaMessage(ctx, video.file_id, video.file_name || `video_${Date.now()}.mp4`, video.mime_type || 'video/mp4', msg.caption || '');
 });
 
-// 处理音频消息
-// @ts-ignore - Telegraf types
 bot.on('audio', async (ctx) => {
-    const audio = ctx.message.audio;
-    const caption = ctx.message.caption || '';
-    
-    await handleMediaMessage(
-        ctx,
-        audio.file_id,
-        audio.file_name || `audio_${Date.now()}.mp3`,
-        audio.mime_type || 'audio/mpeg',
-        caption
-    );
+    const msg = ctx.message as AudioMessage;
+    const audio = msg.audio;
+    await handleMediaMessage(ctx, audio.file_id, audio.file_name || `audio_${Date.now()}.mp3`, audio.mime_type || 'audio/mpeg', msg.caption || '');
 });
 
-// 处理语音消息
-// @ts-ignore - Telegraf types
 bot.on('voice', async (ctx) => {
-    const voice = ctx.message.voice;
-    
-    await handleMediaMessage(
-        ctx,
-        voice.file_id,
-        `voice_${Date.now()}.ogg`,
-        voice.mime_type || 'audio/ogg',
-        ''
-    );
+    const msg = ctx.message as VoiceMessage;
+    await handleMediaMessage(ctx, msg.voice.file_id, `voice_${Date.now()}.ogg`, msg.voice.mime_type || 'audio/ogg', '');
 });
 
-// 处理视频笔记（圆形视频）
-// @ts-ignore - Telegraf types
 bot.on('video_note', async (ctx) => {
-    const videoNote = ctx.message.video_note;
-    
-    await handleMediaMessage(
-        ctx,
-        videoNote.file_id,
-        `video_note_${Date.now()}.mp4`,
-        'video/mp4',
-        ''
-    );
+    const msg = ctx.message as VideoNoteMessage;
+    await handleMediaMessage(ctx, msg.video_note.file_id, `video_note_${Date.now()}.mp4`, 'video/mp4', '');
 });
 
-// 处理贴纸消息
-// @ts-ignore - Telegraf types
 bot.on('sticker', async (ctx) => {
-    const sticker = ctx.message.sticker;
-    
-    // 对于动画贴纸使用 webm，静态贴纸使用 webp
+    const msg = ctx.message as StickerMessage;
+    const sticker = msg.sticker;
     const isAnimated = sticker.is_animated || sticker.is_video;
     const ext = isAnimated ? 'webm' : 'webp';
     const mimeType = isAnimated ? 'video/webm' : 'image/webp';
-    
-    await handleMediaMessage(
-        ctx,
-        sticker.file_id,
-        `sticker_${Date.now()}.${ext}`,
-        mimeType,
-        sticker.emoji || ''
-    );
+    await handleMediaMessage(ctx, sticker.file_id, `sticker_${Date.now()}.${ext}`, mimeType, sticker.emoji || '');
 });
 
-// 处理动画/GIF消息
-// @ts-ignore - Telegraf types
 bot.on('animation', async (ctx) => {
-    const animation = ctx.message.animation;
-    const caption = ctx.message.caption || '';
-    
-    await handleMediaMessage(
-        ctx,
-        animation.file_id,
-        animation.file_name || `animation_${Date.now()}.mp4`,
-        animation.mime_type || 'video/mp4',
-        caption
-    );
+    const msg = ctx.message as AnimationMessage;
+    const anim = msg.animation;
+    await handleMediaMessage(ctx, anim.file_id, anim.file_name || `animation_${Date.now()}.mp4`, anim.mime_type || 'video/mp4', msg.caption || '');
 });
-
-// Launch logic will be in index.ts or separate init function
-

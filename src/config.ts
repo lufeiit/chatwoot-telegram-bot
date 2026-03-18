@@ -1,17 +1,35 @@
 import dotenv from 'dotenv';
+import { createLogger } from './logger';
+
 dotenv.config();
+
+const log = createLogger('config');
 
 export const config = {
     port: process.env.PORT || 3000,
     telegramToken: process.env.TELEGRAM_TOKEN || '',
     telegramAdminId: process.env.TELEGRAM_ADMIN_ID || '',
-    telegramForumChatId: process.env.TELEGRAM_FORUM_CHAT_ID || '',  // Forum 群组 ID（可选）
+    telegramForumChatId: process.env.TELEGRAM_FORUM_CHAT_ID || '',
     chatwootAccessToken: process.env.CHATWOOT_ACCESS_TOKEN || '',
-    chatwootBaseUrl: process.env.CHATWOOT_BASE_URL || 'https://app.chatwoot.com',
+    chatwootBaseUrl: (process.env.CHATWOOT_BASE_URL || 'https://app.chatwoot.com').replace(/\/+$/, ''),
     chatwootAccountId: process.env.CHATWOOT_ACCOUNT_ID || '',
+    chatwootWebhookSecret: process.env.CHATWOOT_WEBHOOK_SECRET || '',
     dbPath: process.env.DB_PATH || 'mappings.db',
 };
 
-if (!config.telegramToken) {
-    console.warn('WARNING: TELEGRAM_TOKEN is not set.');
+const required: Array<[string, string]> = [
+    ['TELEGRAM_TOKEN', config.telegramToken],
+    ['TELEGRAM_ADMIN_ID', config.telegramAdminId],
+    ['CHATWOOT_ACCESS_TOKEN', config.chatwootAccessToken],
+    ['CHATWOOT_ACCOUNT_ID', config.chatwootAccountId],
+];
+
+const missing = required.filter(([, v]) => !v).map(([k]) => k);
+if (missing.length > 0) {
+    log.error(`Missing required environment variables: ${missing.join(', ')}`);
+    process.exit(1);
+}
+
+if (!config.chatwootWebhookSecret) {
+    log.warn('CHATWOOT_WEBHOOK_SECRET is not set — webhook signature verification is disabled');
 }

@@ -1,39 +1,49 @@
+import http from 'http';
 import { app } from './server';
 import { bot } from './bot';
 import { config } from './config';
 import { initDb as initDatabase } from './database';
+import { createLogger } from './logger';
 
+const log = createLogger('main');
 const PORT = config.port;
 
 async function start() {
-    // Initialize Database
     initDatabase();
-    console.log('Database initialized.');
+    log.info('Database initialized');
 
-    // Start Telegram Bot
-    console.log('Starting Telegram bot...');
-    bot.launch({
-        dropPendingUpdates: true,  // 忽略启动前的旧消息
-    }).then(() => {
-        console.log('✅ Telegram bot started successfully (polling mode).');
+    log.info('Starting Telegram bot...');
+    bot.launch({ dropPendingUpdates: true }).then(() => {
+        log.info('Telegram bot started (polling mode)');
     }).catch((err) => {
-        console.error('❌ Failed to start Telegram bot:', err);
+        log.error('Failed to start Telegram bot', { error: String(err) });
     });
 
-    // Start Express Server
-    app.listen(PORT, () => {
-        console.log(`Webhook server running on port ${PORT}`);
+    const server = http.createServer(app);
+    server.listen(PORT, () => {
+        log.info(`Webhook server running on port ${PORT}`);
     });
 
-    // Graceful stop
-    process.once('SIGINT', () => {
-        bot.stop('SIGINT');
-        process.exit(0);
-    });
-    process.once('SIGTERM', () => {
-        bot.stop('SIGTERM');
-        process.exit(0);
-    });
+    const SHUTDOWN_TIMEOUT_MS = 10_000;
+
+    function gracefulShutdown(signal: string) {
+        log.info(`Received ${signal}, shutting down gracefully...`);
+
+        bot.stop(signal);
+
+        server.close(() => {
+            log.info('HTTP server closed');
+            process.exit(0);
+        });
+
+        setTimeout(() => {
+            log.warn('Graceful shutdown timed out, forcing exit');
+            process.exit(1);
+        }, SHUTDOWN_TIMEOUT_MS).unref();
+    }
+
+    process.once('SIGINT', () => gracefulShutdown('SIGINT'));
+    process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 }
 
 start();
