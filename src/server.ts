@@ -36,7 +36,11 @@ function verifySignature(req: RawBodyRequest, res: Response, next: NextFunction)
         return;
     }
 
-    const signature = req.headers['x-chatwoot-signature'] as string | undefined;
+    const signatureHeader = req.headers['x-chatwoot-signature'];
+    const timestampHeader = req.headers['x-chatwoot-timestamp'];
+    const signature = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+    const timestamp = Array.isArray(timestampHeader) ? timestampHeader[0] : timestampHeader;
+
     if (!signature) {
         log.warn('Webhook request missing X-Chatwoot-Signature header', { ip: req.ip });
         res.status(401).json({ error: 'Missing signature' });
@@ -48,16 +52,30 @@ function verifySignature(req: RawBodyRequest, res: Response, next: NextFunction)
         return;
     }
 
-    const expected = crypto
-        .createHmac('sha256', config.chatwootWebhookSecret)
-        .update(req.rawBody)
-        .digest('hex');
+    const normalizedSignature = signature.startsWith('sha256=')
+        ? signature.slice('sha256='.length)
+        : signature;
 
-    const valid = signature.length === expected.length
-        && crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+    const candidates = [
+        crypto.createHmac('sha256', config.chatwootWebhookSecret).update(req.rawBody).digest('hex'),
+    ];
+
+    if (timestamp) {
+        candidates.push(
+            crypto
+                .createHmac('sha256', config.chatwootWebhookSecret)
+                .update(`${timestamp}.${req.rawBody.toString('utf8')}`)
+                .digest('hex')
+        );
+    }
+
+    const valid = candidates.some((candidate) => (
+        candidate.length === normalizedSignature.length
+        && crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(normalizedSignature))
+    ));
 
     if (!valid) {
-        log.warn('Webhook signature verification failed', { ip: req.ip });
+        log.warn('Webhook signature verification failed', { ip: req.ip, hasTimestamp: !!timestamp });
         res.status(401).json({ error: 'Invalid signature' });
         return;
     }
