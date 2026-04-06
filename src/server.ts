@@ -184,9 +184,11 @@ async function downloadAttachment(att: ChatwootAttachment): Promise<{ buffer: Bu
         return { buffer: Buffer.alloc(0), filename, size: declaredSize, sourceUrl: url };
     }
 
+    log.debug('Downloading attachment from Chatwoot', { filename, url: url.substring(0, 120) });
     const resp = await downloadClient.get<ArrayBuffer>(url, { responseType: 'arraybuffer' });
     const buffer = Buffer.from(resp.data);
     const mimeTypeHeader = (resp.headers?.['content-type'] as string | undefined) || undefined;
+    log.debug('Attachment downloaded', { filename, sizeBytes: buffer.length });
     return { buffer, mimeType: mimeTypeHeader || att.content_type, filename, size: buffer.length, sourceUrl: url };
 }
 
@@ -196,7 +198,10 @@ async function getOrCreateTopic(conversationId: number, accountId: number, sende
     if (!config.telegramForumChatId) return undefined;
 
     const existing = getTopic(conversationId);
-    if (existing) return existing.telegram_topic_id;
+    if (existing) {
+        log.debug('Using existing forum topic', { conversationId, topicId: existing.telegram_topic_id });
+        return existing.telegram_topic_id;
+    }
 
     try {
         const topicName = `🗨️ ${senderName} #${conversationId}`;
@@ -271,6 +276,12 @@ async function sendAttachmentToTelegram(params: {
     const sendOptions: { message_thread_id?: number } = {};
     if (messageThreadId) sendOptions.message_thread_id = messageThreadId;
 
+    log.debug('Sending attachment to Telegram', {
+        conversationId,
+        filename: att.file_name,
+        fileType: att.file_type,
+    });
+
     const directUrl = pickAttachmentUrl(att);
     if (directUrl && !directUrl.startsWith('data:')) {
         const kind = guessTelegramSendKind(att, att.content_type);
@@ -281,6 +292,7 @@ async function sendAttachmentToTelegram(params: {
             else if (kind === 'audio') sent = await bot.telegram.sendAudio(chatId, directUrl, sendOptions);
             else sent = await bot.telegram.sendDocument(chatId, directUrl, sendOptions);
             saveMapping(sent.message_id, conversationId, accountId, chatwootMessageId);
+            log.debug('Attachment sent via direct URL', { filename: att.file_name, kind });
             return;
         } catch {
             log.warn('Direct URL send failed, falling back to download+upload', { filename: att.file_name });
@@ -306,6 +318,7 @@ async function sendAttachmentToTelegram(params: {
             sendOptions,
         );
         saveMapping(sent.message_id, conversationId, accountId, chatwootMessageId);
+        log.warn('Attachment too large for Telegram', { filename: downloaded.filename, sizeMB: Math.ceil(downloaded.size / 1024 / 1024) });
         return;
     }
 
@@ -319,6 +332,7 @@ async function sendAttachmentToTelegram(params: {
         else if (kind === 'audio') sent = await bot.telegram.sendAudio(chatId, inputFile, sendOptions);
         else sent = await bot.telegram.sendDocument(chatId, inputFile, sendOptions);
         saveMapping(sent.message_id, conversationId, accountId, chatwootMessageId);
+        log.debug('Attachment sent via download+upload', { filename: downloaded.filename, kind });
     } catch (err) {
         log.error('Attachment send to Telegram failed', { filename: downloaded.filename, error: String(err) });
         const url = downloaded.sourceUrl || pickAttachmentUrl(att);
@@ -331,10 +345,16 @@ async function sendAttachmentToTelegram(params: {
 
 async function handleMessageCreated(event: ChatwootMessageEvent) {
     const messageType = event?.message_type;
-    if (messageType !== 'incoming' && messageType !== 'outgoing') return;
+    if (messageType !== 'incoming' && messageType !== 'outgoing') {
+        log.debug('Skipping non-message event', { messageType, eventId: event?.id });
+        return;
+    }
 
     // Skip private/internal notes
-    if (event?.private) return;
+    if (event?.private) {
+        log.debug('Skipping private message', { eventId: event?.id });
+        return;
+    }
 
     // Prevent outgoing message loop: skip messages we sent ourselves
     if (messageType === 'outgoing' && isSelfSentMessage(event?.id)) {
@@ -344,12 +364,24 @@ async function handleMessageCreated(event: ChatwootMessageEvent) {
 
     const conversationId = event?.conversation?.id;
     const accountId = event?.account?.id;
-    if (!conversationId || !accountId) return;
+    if (!conversationId || !accountId) {
+        log.warn('Webhook event missing conversation or account ID', { conversationId, accountId, eventId: event?.id });
+        return;
+    }
 
     const attachments = extractAttachments(event);
     const messageContent = event?.content || (attachments.length > 0 ? '[附件]' : '[无内容]');
     const senderName = event?.sender?.name || '未知';
     const senderEmail = event?.sender?.email || '';
+
+    log.info('Processing webhook message', {
+        conversationId,
+        messageType,
+        senderName,
+        attachmentCount: attachments.length,
+        contentPreview: messageContent.substring(0, 80),
+        chatwootMessageId: event?.id,
+    });
 
     const topicId = await getOrCreateTopic(conversationId, accountId, senderName);
     const isForumMode = !!topicId && !!config.telegramForumChatId;
@@ -381,6 +413,7 @@ async function handleMessageCreated(event: ChatwootMessageEvent) {
     try {
         const sentMessage = await bot.telegram.sendMessage(chatId, text, sendOptions);
         saveMapping(sentMessage.message_id, conversationId, accountId, event?.id);
+        log.debug('Message forwarded to Telegram', { conversationId, telegramMessageId: sentMessage.message_id });
 
         await mapWithConcurrencyLimit(attachments, ATTACHMENT_CONCURRENCY, async (att) => {
             await sendAttachmentToTelegram({
@@ -405,6 +438,7 @@ async function handleMessageCreated(event: ChatwootMessageEvent) {
                     const newOpts = { ...sendOptions, message_thread_id: newTopicId };
                     const sentMessage = await bot.telegram.sendMessage(config.telegramForumChatId, text, newOpts);
                     saveMapping(sentMessage.message_id, conversationId, accountId, event?.id);
+                    log.info('Message resent after topic recreation', { conversationId, newTopicId });
                 }
             } catch (retryError) {
                 log.error('Failed to recreate topic and resend', { conversationId, error: String(retryError) });
@@ -417,6 +451,8 @@ async function handleConversationStatusChanged(event: ChatwootConversationStatus
     const conversationId = event?.id || event?.conversation?.id;
     const status = event?.status;
     if (!conversationId) return;
+
+    log.info('Conversation status changed', { conversationId, status });
 
     if (status === 'resolved') {
         const closed = await closeTopicForConversation(conversationId);
@@ -437,6 +473,13 @@ app.post('/webhook', verifySignature, (req: RawBodyRequest, res: Response) => {
     const eventType = event?.event as string | undefined;
     const eventId = event?.id;
 
+    log.debug('Webhook received', {
+        eventType,
+        eventId,
+        conversationId: event?.conversation?.id,
+        messageType: event?.message_type,
+    });
+
     // Deduplication: skip already-processed events
     if (eventId && eventType) {
         const dedupKey = `${eventType}:${eventId}`;
@@ -450,6 +493,8 @@ app.post('/webhook', verifySignature, (req: RawBodyRequest, res: Response) => {
         void handleMessageCreated(event as ChatwootMessageEvent);
     } else if (eventType === 'conversation_status_changed') {
         void handleConversationStatusChanged(event as ChatwootConversationStatusEvent);
+    } else {
+        log.debug('Unhandled webhook event type', { eventType });
     }
 });
 

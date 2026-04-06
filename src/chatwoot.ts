@@ -3,7 +3,7 @@ import http from 'http';
 import https from 'https';
 import FormData from 'form-data';
 import { config } from './config';
-import { createLogger } from './logger';
+import { createLogger, extractAxiosError } from './logger';
 import type { CannedResponse } from './types';
 
 const log = createLogger('chatwoot');
@@ -44,13 +44,23 @@ async function withRetry<T>(fn: () => Promise<T>, label: string, maxRetries = 3,
 
             const axErr = error as { response?: { status?: number } };
             const status = axErr?.response?.status;
-            if (status && status >= 400 && status < 500 && status !== 429) break;
+
+            // Don't retry client errors (except 429 Too Many Requests)
+            if (status && status >= 400 && status < 500 && status !== 429) {
+                log.error(`${label} failed with client error (not retriable)`, extractAxiosError(error));
+                break;
+            }
 
             const delay = baseDelay * Math.pow(2, attempt) + Math.random() * 500;
-            log.warn(`${label} failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${Math.round(delay)}ms`, { status });
+            log.warn(`${label} failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${Math.round(delay)}ms`, {
+                status,
+                ...extractAxiosError(error),
+            });
             await new Promise(r => setTimeout(r, delay));
         }
     }
+
+    log.error(`${label} exhausted all retries`, extractAxiosError(lastError));
     throw lastError;
 }
 
@@ -69,6 +79,7 @@ sentIdCleanupTimer.unref();
 
 function trackSentMessage(chatwootMessageId: number) {
     recentlySentIds.set(chatwootMessageId, Date.now());
+    log.debug('Tracked sent message for dedup', { chatwootMessageId });
 }
 
 export function isSelfSentMessage(chatwootMessageId: number | undefined): boolean {
@@ -79,7 +90,12 @@ export function isSelfSentMessage(chatwootMessageId: number | undefined): boolea
 // ============ Messages ============
 
 export async function createMessage(conversationId: number, content: string) {
-    return withRetry(async () => {
+    log.debug('Creating message in Chatwoot', {
+        conversationId,
+        contentPreview: content.substring(0, 100) + (content.length > 100 ? '...' : ''),
+    });
+
+    const result = await withRetry(async () => {
         const accountId = config.chatwootAccountId;
         const url = `/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
         const response = await client.post(url, {
@@ -90,10 +106,19 @@ export async function createMessage(conversationId: number, content: string) {
         if (response.data?.id) trackSentMessage(response.data.id);
         return response.data;
     }, `createMessage(conv=${conversationId})`);
+
+    log.info('Message created in Chatwoot', {
+        conversationId,
+        chatwootMessageId: result?.id,
+    });
+
+    return result;
 }
 
 export async function createPrivateNote(conversationId: number, content: string) {
-    return withRetry(async () => {
+    log.debug('Creating private note in Chatwoot', { conversationId });
+
+    const result = await withRetry(async () => {
         const accountId = config.chatwootAccountId;
         const url = `/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
         const response = await client.post(url, {
@@ -104,6 +129,9 @@ export async function createPrivateNote(conversationId: number, content: string)
         if (response.data?.id) trackSentMessage(response.data.id);
         return response.data;
     }, `createPrivateNote(conv=${conversationId})`);
+
+    log.info('Private note created in Chatwoot', { conversationId, chatwootMessageId: result?.id });
+    return result;
 }
 
 export async function createMessageWithAttachment(
@@ -111,7 +139,14 @@ export async function createMessageWithAttachment(
     content: string,
     attachment: { buffer: Buffer; filename: string; mimeType?: string }
 ) {
-    return withRetry(async () => {
+    log.debug('Creating message with attachment in Chatwoot', {
+        conversationId,
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+        sizeBytes: attachment.buffer.length,
+    });
+
+    const result = await withRetry(async () => {
         const accountId = config.chatwootAccountId;
         const url = `/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
 
@@ -133,17 +168,29 @@ export async function createMessageWithAttachment(
         if (response.data?.id) trackSentMessage(response.data.id);
         return response.data;
     }, `createMessageWithAttachment(conv=${conversationId})`);
+
+    log.info('Attachment message created in Chatwoot', {
+        conversationId,
+        chatwootMessageId: result?.id,
+        filename: attachment.filename,
+    });
+    return result;
 }
 
 // ============ Conversation Status ============
 
 export async function toggleConversationStatus(conversationId: number, status: 'open' | 'resolved') {
-    return withRetry(async () => {
+    log.debug('Toggling conversation status', { conversationId, status });
+
+    const result = await withRetry(async () => {
         const accountId = config.chatwootAccountId;
         const url = `/api/v1/accounts/${accountId}/conversations/${conversationId}/toggle_status`;
         const response = await client.post(url, { status });
         return response.data;
     }, `toggleStatus(conv=${conversationId}, status=${status})`);
+
+    log.info('Conversation status toggled', { conversationId, status });
+    return result;
 }
 
 // ============ Typing Status ============
@@ -153,8 +200,9 @@ export async function toggleTypingStatus(conversationId: number, typingStatus: '
         const accountId = config.chatwootAccountId;
         const url = `/api/v1/accounts/${accountId}/conversations/${conversationId}/toggle_typing_status`;
         await client.post(url, { typing_status: typingStatus });
+        log.debug('Typing status toggled', { conversationId, typingStatus });
     } catch (error) {
-        log.debug('Failed to toggle typing status (non-critical)', { conversationId, typingStatus });
+        log.debug('Failed to toggle typing status (non-critical)', { conversationId, typingStatus, ...extractAxiosError(error) });
     }
 }
 
@@ -166,6 +214,7 @@ let cannedCache: { data: CannedResponse[]; key: string; ts: number } | null = nu
 export async function getCannedResponses(search?: string): Promise<CannedResponse[]> {
     const cacheKey = search || '__all__';
     if (cannedCache && cannedCache.key === cacheKey && Date.now() - cannedCache.ts < CANNED_CACHE_TTL_MS) {
+        log.debug('Returning cached canned responses', { count: cannedCache.data.length });
         return cannedCache.data;
     }
 
@@ -178,6 +227,7 @@ export async function getCannedResponses(search?: string): Promise<CannedRespons
         return response.data as CannedResponse[];
     }, 'getCannedResponses');
 
+    log.debug('Fetched canned responses', { count: data.length, search });
     cannedCache = { data, key: cacheKey, ts: Date.now() };
     return data;
 }

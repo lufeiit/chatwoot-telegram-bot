@@ -9,7 +9,7 @@ import {
     toggleTypingStatus,
     getCannedResponses,
 } from './chatwoot';
-import { createLogger } from './logger';
+import { createLogger, extractAxiosError } from './logger';
 
 const log = createLogger('bot');
 
@@ -36,6 +36,22 @@ function isAdmin(ctx: Context): boolean {
 }
 
 /**
+ * Set a reaction emoji on a message to provide visual feedback.
+ * Silently fails since reactions are non-critical.
+ */
+async function setMessageReaction(chatId: string | number, messageId: number, emoji: string): Promise<void> {
+    try {
+        await bot.telegram.callApi('setMessageReaction', {
+            chat_id: chatId,
+            message_id: messageId,
+            reaction: JSON.stringify([{ type: 'emoji', emoji }]),
+        });
+    } catch (err) {
+        log.debug('Failed to set message reaction (non-critical)', { chatId, messageId, emoji, error: String(err) });
+    }
+}
+
+/**
  * Resolve the Chatwoot conversation ID from either forum topic or reply context.
  * Returns null if no mapping found.
  */
@@ -44,15 +60,31 @@ function resolveConversationId(ctx: Context & { message?: Message }): number | n
         const threadId = (ctx.message as Message & { message_thread_id?: number })?.message_thread_id;
         if (threadId) {
             const mapping = getTopicByTopicId(threadId);
+            if (mapping) {
+                log.debug('Resolved conversation from forum topic', { threadId, conversationId: mapping.chatwoot_conversation_id });
+            } else {
+                log.debug('No conversation mapping found for forum topic', { threadId });
+            }
             return mapping ? mapping.chatwoot_conversation_id : null;
         }
+        log.debug('Forum message has no thread ID');
         return null;
     }
 
-    if (!isAdmin(ctx)) return null;
+    if (!isAdmin(ctx)) {
+        log.debug('Message from non-admin user, ignoring', { userId: ctx.from?.id });
+        return null;
+    }
+
     const replyTo = (ctx.message as Message & { reply_to_message?: Message })?.reply_to_message;
     if (!replyTo) return null;
+
     const mapping = getMapping(replyTo.message_id);
+    if (mapping) {
+        log.debug('Resolved conversation from reply', { replyMessageId: replyTo.message_id, conversationId: mapping.chatwoot_conversation_id });
+    } else {
+        log.debug('No conversation mapping found for reply', { replyMessageId: replyTo.message_id });
+    }
     return mapping ? mapping.chatwoot_conversation_id : null;
 }
 
@@ -78,7 +110,7 @@ bot.command('canned', async (ctx) => {
 
         await sendCannedResponsePage(ctx, responses, 0, conversationId);
     } catch (error) {
-        log.error('Failed to fetch canned responses', { error: String(error) });
+        log.error('Failed to fetch canned responses', extractAxiosError(error));
         await ctx.reply('获取预设回复失败，请检查日志。');
     }
 });
@@ -136,12 +168,25 @@ bot.on('text', async (ctx) => {
         const topicMapping = getTopicByTopicId(threadId);
         if (!topicMapping) return;
 
+        log.debug('Processing forum text message', {
+            threadId,
+            conversationId: topicMapping.chatwoot_conversation_id,
+            textPreview: msg.text.substring(0, 80),
+        });
+
         try {
             void toggleTypingStatus(topicMapping.chatwoot_conversation_id, 'on');
             await createMessage(topicMapping.chatwoot_conversation_id, msg.text);
+            // ✅ React to confirm successful delivery
+            await setMessageReaction(ctx.chat.id, msg.message_id, '✅');
+            log.info('Forum message sent to Chatwoot', { conversationId: topicMapping.chatwoot_conversation_id });
         } catch (error) {
-            log.error('Failed to send message to Chatwoot', { error: String(error) });
-            await ctx.reply('发送消息到 Chatwoot 失败，请检查日志。');
+            log.error('Failed to send forum message to Chatwoot', {
+                conversationId: topicMapping.chatwoot_conversation_id,
+                ...extractAxiosError(error),
+            });
+            await setMessageReaction(ctx.chat.id, msg.message_id, '❌');
+            await ctx.reply('❌ 发送消息到 Chatwoot 失败，请查看日志。');
         }
         return;
     }
@@ -160,12 +205,25 @@ bot.on('text', async (ctx) => {
         return;
     }
 
+    log.debug('Processing admin reply message', {
+        conversationId: mapping.chatwoot_conversation_id,
+        replyToMessageId: replyTo.message_id,
+        textPreview: msg.text.substring(0, 80),
+    });
+
     try {
         void toggleTypingStatus(mapping.chatwoot_conversation_id, 'on');
         await createMessage(mapping.chatwoot_conversation_id, msg.text);
+        // ✅ React to confirm successful delivery
+        await setMessageReaction(ctx.chat.id, msg.message_id, '✅');
+        log.info('Admin reply sent to Chatwoot', { conversationId: mapping.chatwoot_conversation_id });
     } catch (error) {
-        log.error('Failed to send message to Chatwoot', { error: String(error) });
-        await ctx.reply('发送消息到 Chatwoot 失败，请检查日志。');
+        log.error('Failed to send admin reply to Chatwoot', {
+            conversationId: mapping.chatwoot_conversation_id,
+            ...extractAxiosError(error),
+        });
+        await setMessageReaction(ctx.chat.id, msg.message_id, '❌');
+        await ctx.reply('❌ 发送消息到 Chatwoot 失败，请查看日志。');
     }
 });
 
@@ -208,7 +266,7 @@ bot.on('callback_query', async (ctx) => {
                 // edit may fail if message is too old
             }
         } catch (error) {
-            log.error('Failed to send canned response', { responseId, conversationId, error: String(error) });
+            log.error('Failed to send canned response', { responseId, conversationId, ...extractAxiosError(error) });
             await ctx.answerCbQuery('❌ 发送失败，请重试');
         }
         return;
@@ -227,7 +285,7 @@ bot.on('callback_query', async (ctx) => {
             await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
             await ctx.answerCbQuery();
         } catch (error) {
-            log.error('Failed to paginate canned responses', { error: String(error) });
+            log.error('Failed to paginate canned responses', extractAxiosError(error));
             await ctx.answerCbQuery('加载失败');
         }
         return;
@@ -285,7 +343,7 @@ bot.on('callback_query', async (ctx) => {
                 log.debug('Failed to update control panel (content may be identical)');
             }
         } catch (error) {
-            log.error('Failed to resolve conversation', { conversationId, error: String(error) });
+            log.error('Failed to resolve conversation', { conversationId, ...extractAxiosError(error) });
             await ctx.answerCbQuery('❌ 操作失败，请重试');
         }
         return;
@@ -335,7 +393,7 @@ bot.on('callback_query', async (ctx) => {
                 log.debug('Failed to update control panel (content may be identical)');
             }
         } catch (error) {
-            log.error('Failed to reopen conversation', { conversationId, error: String(error) });
+            log.error('Failed to reopen conversation', { conversationId, ...extractAxiosError(error) });
             await ctx.answerCbQuery('❌ 操作失败，请重试');
         }
         return;
@@ -374,7 +432,7 @@ bot.on('callback_query', async (ctx) => {
                 await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
                 await ctx.reply(`会话 #${mapping.chatwoot_conversation_id} 已标记为已解决。`);
             } catch (error) {
-                log.error('Failed to resolve conversation', { error: String(error) });
+                log.error('Failed to resolve conversation', extractAxiosError(error));
                 await ctx.answerCbQuery('解决失败。');
             }
         } else {
@@ -387,6 +445,7 @@ bot.on('callback_query', async (ctx) => {
 // ============ Media Message Handlers ============
 
 async function downloadTelegramFile(fileId: string): Promise<{ buffer: Buffer; filePath: string }> {
+    log.debug('Downloading Telegram file', { fileId });
     const file = await bot.telegram.getFile(fileId);
     const filePath = file.file_path;
     if (!filePath) throw new Error('无法获取文件路径');
@@ -396,6 +455,7 @@ async function downloadTelegramFile(fileId: string): Promise<{ buffer: Buffer; f
     if (!response.ok) throw new Error(`下载文件失败: ${response.status} ${response.statusText}`);
 
     const arrayBuffer = await response.arrayBuffer();
+    log.debug('Telegram file downloaded', { fileId, filePath, sizeBytes: arrayBuffer.byteLength });
     return { buffer: Buffer.from(arrayBuffer), filePath };
 }
 
@@ -414,6 +474,8 @@ async function handleMediaMessage(
         return;
     }
 
+    log.debug('Processing media message', { conversationId, filename, mimeType, fileId });
+
     try {
         void toggleTypingStatus(conversationId, 'on');
         const { buffer, filePath } = await downloadTelegramFile(fileId);
@@ -424,10 +486,15 @@ async function handleMediaMessage(
             filename: finalFilename,
             mimeType,
         });
+        // ✅ React to confirm successful attachment delivery
+        const msg = ctx.message as Message;
+        await setMessageReaction(ctx.chat!.id, msg.message_id, '✅');
         log.info('Attachment sent to Chatwoot', { conversationId, filename: finalFilename });
     } catch (error) {
-        log.error('Failed to send attachment to Chatwoot', { conversationId, error: String(error) });
-        await ctx.reply('发送附件到 Chatwoot 失败，请检查日志。');
+        log.error('Failed to send attachment to Chatwoot', { conversationId, filename, ...extractAxiosError(error) });
+        const msg = ctx.message as Message;
+        await setMessageReaction(ctx.chat!.id, msg.message_id, '❌');
+        await ctx.reply('❌ 发送附件到 Chatwoot 失败，请查看日志。');
     }
 }
 
