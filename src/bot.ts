@@ -41,10 +41,10 @@ function isAdmin(ctx: Context): boolean {
  */
 async function setMessageReaction(chatId: string | number, messageId: number, emoji: string): Promise<void> {
     try {
-        await bot.telegram.callApi('setMessageReaction', {
+        await (bot.telegram as any).callApi('setMessageReaction', {
             chat_id: chatId,
             message_id: messageId,
-            reaction: JSON.stringify([{ type: 'emoji', emoji }]),
+            reaction: [{ type: 'emoji', emoji }],
         });
     } catch (err) {
         log.debug('Failed to set message reaction (non-critical)', { chatId, messageId, emoji, error: String(err) });
