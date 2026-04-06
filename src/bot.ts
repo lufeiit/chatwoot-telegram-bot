@@ -37,17 +37,20 @@ function isAdmin(ctx: Context): boolean {
 
 /**
  * Set a reaction emoji on a message to provide visual feedback.
- * Silently fails since reactions are non-critical.
+ * Returns true if successful, false if failed (caller can use fallback).
+ * Telegram only supports specific emojis: 👍👎❤️🔥🥰👏😁🤔🤯😱🤬😢🎉🤩 etc.
  */
-async function setMessageReaction(chatId: string | number, messageId: number, emoji: string): Promise<void> {
+async function setMessageReaction(chatId: string | number, messageId: number, emoji: string): Promise<boolean> {
     try {
         await (bot.telegram as any).callApi('setMessageReaction', {
             chat_id: chatId,
             message_id: messageId,
             reaction: [{ type: 'emoji', emoji }],
         });
+        return true;
     } catch (err) {
-        log.debug('Failed to set message reaction (non-critical)', { chatId, messageId, emoji, error: String(err) });
+        log.debug('Failed to set message reaction', { chatId, messageId, emoji, error: String(err) });
+        return false;
     }
 }
 
@@ -177,15 +180,21 @@ bot.on('text', async (ctx) => {
         try {
             void toggleTypingStatus(topicMapping.chatwoot_conversation_id, 'on');
             await createMessage(topicMapping.chatwoot_conversation_id, msg.text);
-            // ✅ React to confirm successful delivery
-            await setMessageReaction(ctx.chat.id, msg.message_id, '✅');
+            // React to confirm successful delivery (👍), fallback to brief reply
+            const reacted = await setMessageReaction(ctx.chat.id, msg.message_id, '👍');
+            if (!reacted) {
+                await ctx.reply('✅ 已发送', { reply_parameters: { message_id: msg.message_id } });
+            }
             log.info('Forum message sent to Chatwoot', { conversationId: topicMapping.chatwoot_conversation_id });
         } catch (error) {
             log.error('Failed to send forum message to Chatwoot', {
                 conversationId: topicMapping.chatwoot_conversation_id,
                 ...extractAxiosError(error),
             });
-            await setMessageReaction(ctx.chat.id, msg.message_id, '❌');
+            const reacted = await setMessageReaction(ctx.chat.id, msg.message_id, '👎');
+            if (!reacted) {
+                await ctx.reply('❌ 发送失败', { reply_parameters: { message_id: msg.message_id } });
+            }
             await ctx.reply('❌ 发送消息到 Chatwoot 失败，请查看日志。');
         }
         return;
@@ -214,15 +223,21 @@ bot.on('text', async (ctx) => {
     try {
         void toggleTypingStatus(mapping.chatwoot_conversation_id, 'on');
         await createMessage(mapping.chatwoot_conversation_id, msg.text);
-        // ✅ React to confirm successful delivery
-        await setMessageReaction(ctx.chat.id, msg.message_id, '✅');
+        // React to confirm successful delivery (👍), fallback to brief reply
+        const reacted = await setMessageReaction(ctx.chat.id, msg.message_id, '👍');
+        if (!reacted) {
+            await ctx.reply('✅ 已发送', { reply_parameters: { message_id: msg.message_id } });
+        }
         log.info('Admin reply sent to Chatwoot', { conversationId: mapping.chatwoot_conversation_id });
     } catch (error) {
         log.error('Failed to send admin reply to Chatwoot', {
             conversationId: mapping.chatwoot_conversation_id,
             ...extractAxiosError(error),
         });
-        await setMessageReaction(ctx.chat.id, msg.message_id, '❌');
+        const reacted = await setMessageReaction(ctx.chat.id, msg.message_id, '👎');
+        if (!reacted) {
+            await ctx.reply('❌ 发送失败', { reply_parameters: { message_id: msg.message_id } });
+        }
         await ctx.reply('❌ 发送消息到 Chatwoot 失败，请查看日志。');
     }
 });
@@ -486,14 +501,20 @@ async function handleMediaMessage(
             filename: finalFilename,
             mimeType,
         });
-        // ✅ React to confirm successful attachment delivery
+        // React to confirm successful attachment delivery
         const msg = ctx.message as Message;
-        await setMessageReaction(ctx.chat!.id, msg.message_id, '✅');
+        const reacted = await setMessageReaction(ctx.chat!.id, msg.message_id, '👍');
+        if (!reacted) {
+            await ctx.reply('✅ 附件已发送', { reply_parameters: { message_id: msg.message_id } });
+        }
         log.info('Attachment sent to Chatwoot', { conversationId, filename: finalFilename });
     } catch (error) {
         log.error('Failed to send attachment to Chatwoot', { conversationId, filename, ...extractAxiosError(error) });
         const msg = ctx.message as Message;
-        await setMessageReaction(ctx.chat!.id, msg.message_id, '❌');
+        const reacted = await setMessageReaction(ctx.chat!.id, msg.message_id, '👎');
+        if (!reacted) {
+            await ctx.reply('❌ 附件发送失败', { reply_parameters: { message_id: msg.message_id } });
+        }
         await ctx.reply('❌ 发送附件到 Chatwoot 失败，请查看日志。');
     }
 }
