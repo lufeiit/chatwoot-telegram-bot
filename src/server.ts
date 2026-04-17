@@ -371,8 +371,21 @@ async function handleMessageCreated(event: ChatwootMessageEvent) {
 
     const attachments = extractAttachments(event);
     const messageContent = event?.content || (attachments.length > 0 ? '[附件]' : '[无内容]');
-    const senderName = event?.sender?.name || '未知';
-    const senderEmail = event?.sender?.email || '';
+
+    // Bug fix: outgoing 消息时 event.sender 是 agent，不是联系人。
+    // conversation.meta.sender 才保存了真实联系人信息（无论消息方向）。
+    const contactInfo = event?.conversation?.meta?.sender;
+    const eventSender = event?.sender;
+    const senderName =
+        (messageType === 'incoming' ? eventSender?.name : undefined) ||
+        contactInfo?.name ||
+        eventSender?.name ||
+        '未知';
+    const senderEmail =
+        (messageType === 'incoming' ? eventSender?.email : undefined) ||
+        contactInfo?.email ||
+        eventSender?.email ||
+        '';
 
     log.info('Processing webhook message', {
         conversationId,

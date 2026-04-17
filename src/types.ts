@@ -7,11 +7,22 @@ export interface ChatwootSender {
     type?: string; // 'contact' | 'user' | 'agent_bot'
 }
 
+export interface ChatwootConversationMeta {
+    sender?: {
+        id?: number;
+        name?: string;
+        email?: string;
+        type?: string;
+    };
+}
+
 export interface ChatwootConversation {
     id: number;
     account_id?: number;
     inbox_id?: number;
     status?: string;
+    /** 联系人元信息，outgoing 消息中可用此字段获取真实联系人姓名 */
+    meta?: ChatwootConversationMeta;
 }
 
 export interface ChatwootAccount {
