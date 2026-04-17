@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import 'dotenv/config';
 
 export enum LogLevel {
     DEBUG = 0,

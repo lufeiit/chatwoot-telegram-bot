@@ -7,7 +7,7 @@ import https from 'https';
 import { config } from './config';
 import { bot } from './bot';
 import { saveMapping, saveTopic, getTopic, deleteTopic } from './database';
-import { isSelfSentMessage, toggleTypingStatus } from './chatwoot';
+import { isSelfSentMessage, toggleTypingStatus, conversationMutex } from './chatwoot';
 import { createLogger } from './logger';
 import type { ChatwootAttachment, ChatwootMessageEvent, ChatwootConversationStatusEvent } from './types';
 
@@ -376,16 +376,17 @@ async function handleMessageCreated(event: ChatwootMessageEvent) {
     // conversation.meta.sender 才保存了真实联系人信息（无论消息方向）。
     const contactInfo = event?.conversation?.meta?.sender;
     const eventSender = event?.sender;
-    const senderName =
-        (messageType === 'incoming' ? eventSender?.name : undefined) ||
-        contactInfo?.name ||
-        eventSender?.name ||
-        '未知';
-    const senderEmail =
-        (messageType === 'incoming' ? eventSender?.email : undefined) ||
-        contactInfo?.email ||
-        eventSender?.email ||
-        '';
+    
+    let senderName = '未知';
+    let senderEmail = '';
+
+    if (messageType === 'incoming') {
+        senderName = eventSender?.name || contactInfo?.name || '未知';
+        senderEmail = eventSender?.email || contactInfo?.email || '';
+    } else {
+        senderName = eventSender?.name || '客服';
+        senderEmail = eventSender?.email || '';
+    }
 
     log.info('Processing webhook message', {
         conversationId,
@@ -493,8 +494,7 @@ app.post('/webhook', verifySignature, (req: RawBodyRequest, res: Response) => {
         messageType: event?.message_type,
     });
 
-    // Deduplication: skip already-processed events
-    if (eventId && eventType) {
+    if (eventType && eventId) {
         const dedupKey = `${eventType}:${eventId}`;
         if (dedup.isDuplicate(dedupKey)) {
             log.debug('Duplicate webhook event skipped', { dedupKey });
@@ -502,12 +502,24 @@ app.post('/webhook', verifySignature, (req: RawBodyRequest, res: Response) => {
         }
     }
 
-    if (eventType === 'message_created') {
-        void handleMessageCreated(event as ChatwootMessageEvent);
-    } else if (eventType === 'conversation_status_changed') {
-        void handleConversationStatusChanged(event as ChatwootConversationStatusEvent);
+    const convId = event?.conversation?.id || (eventType === 'conversation_status_changed' ? event?.id : undefined);
+
+    const runner = async () => {
+        if (eventType === 'message_created') {
+            await handleMessageCreated(event as ChatwootMessageEvent);
+        } else if (eventType === 'conversation_status_changed') {
+            await handleConversationStatusChanged(event as ChatwootConversationStatusEvent);
+        } else {
+            log.debug('Unhandled webhook event type', { eventType });
+        }
+    };
+
+    if (convId) {
+        conversationMutex.runExclusive(`conv_${convId}`, runner).catch(err => {
+            log.error('Webhook processing error', { error: String(err) });
+        });
     } else {
-        log.debug('Unhandled webhook event type', { eventType });
+        runner().catch(err => log.error('Webhook processing error', { error: String(err) }));
     }
 });
 
