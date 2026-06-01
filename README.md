@@ -87,6 +87,8 @@ TELEGRAM_TOKEN=你的_Telegram_Bot_Token
 TELEGRAM_ADMIN_ID=你的_Telegram_User_ID
 # 如果你开启了群组话题模式，填入群组ID（强烈推荐）；如果只用单聊模式，将此行注释掉
 TELEGRAM_FORUM_CHAT_ID=-100xxxxxxxxxx
+# 可选：启动时丢弃堆积的 Telegram 更新。默认 false（重启窗口期不丢消息）。
+# TELEGRAM_DROP_PENDING_UPDATES=false
 
 # Chatwoot 配置
 CHATWOOT_BASE_URL=https://你的chatwoot域名.com
@@ -96,9 +98,39 @@ CHATWOOT_ACCOUNT_ID=1
 # 可选：Webhook 签名验证密钥（在 Chatwoot Webhook 设置中生成后填入）
 # CHATWOOT_WEBHOOK_SECRET=your_webhook_secret
 
-# 日志级别
+# 日志级别（debug / info / warn / error）
 LOG_LEVEL=info
+
+# 可选：日志写入文件 + 自动轮转
+# LOG_TO_FILE=true            # 是否同时写入日志文件，默认 false（仅控制台）
+# LOG_DIR=./logs              # 日志目录
+# LOG_MAX_SIZE_MB=10          # 单文件大小上限，超过自动轮转
+# LOG_MAX_FILES=3             # 保留的历史日志份数
+
+# 可选：SQLite 数据库路径，默认 ./mappings.db（容器内 /app/data/mappings.db）
+# DB_PATH=/app/data/mappings.db
 ```
+
+#### 环境变量速查
+
+| 变量 | 必填 | 默认值 | 说明 |
+|---|:---:|---|---|
+| `TELEGRAM_TOKEN` | ✅ | — | 从 @BotFather 获取的 Bot Token |
+| `TELEGRAM_ADMIN_ID` | ✅ | — | 管理员 User ID（单聊模式必填） |
+| `TELEGRAM_FORUM_CHAT_ID` | ⭕ | — | 话题群组 ID（推荐启用） |
+| `TELEGRAM_DROP_PENDING_UPDATES` | ⭕ | `false` | 启动时是否丢弃堆积更新 |
+| `CHATWOOT_BASE_URL` | ✅ | `https://app.chatwoot.com` | Chatwoot 后台地址（自动去尾斜杠） |
+| `CHATWOOT_ACCESS_TOKEN` | ✅ | — | Personal Access Token |
+| `CHATWOOT_ACCOUNT_ID` | ✅ | — | 账户 ID |
+| `CHATWOOT_WEBHOOK_SECRET` | ⭕ | — | Webhook 签名密钥（强烈推荐设置） |
+| `PORT` | ⭕ | `3000` | Webhook 监听端口 |
+| `LOG_LEVEL` | ⭕ | `info` | `debug` / `info` / `warn` / `error` |
+| `LOG_TO_FILE` | ⭕ | `false` | 是否写入日志文件 |
+| `LOG_DIR` | ⭕ | `./logs` | 日志目录 |
+| `LOG_MAX_SIZE_MB` | ⭕ | `10` | 单个日志文件大小上限（MB） |
+| `LOG_MAX_FILES` | ⭕ | `3` | 保留的历史日志数 |
+| `DB_PATH` | ⭕ | `mappings.db` | SQLite 数据库路径 |
+| `NODE_ENV` | ⭕ | — | 设为 `production` 启用 JSON 结构化日志 |
 
 保存并退出（在 nano 中按 `Ctrl+O`, `Enter`, `Ctrl+X`）。
 

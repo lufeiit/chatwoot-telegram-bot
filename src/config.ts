@@ -5,11 +5,20 @@ dotenv.config();
 
 const log = createLogger('config');
 
+/** 解析布尔型环境变量，未设置或非真值返回 false */
+function envBool(name: string, defaultValue = false): boolean {
+    const v = process.env[name];
+    if (v == null) return defaultValue;
+    return /^(1|true|yes|on)$/i.test(v.trim());
+}
+
 export const config = {
     port: process.env.PORT || 3000,
     telegramToken: process.env.TELEGRAM_TOKEN || '',
     telegramAdminId: process.env.TELEGRAM_ADMIN_ID || '',
     telegramForumChatId: process.env.TELEGRAM_FORUM_CHAT_ID || '',
+    /** 启动时是否丢弃堆积的 Telegram 更新。默认 false，避免重启窗口期回复丢失。 */
+    telegramDropPendingUpdates: envBool('TELEGRAM_DROP_PENDING_UPDATES', false),
     chatwootAccessToken: process.env.CHATWOOT_ACCESS_TOKEN || '',
     chatwootBaseUrl: (process.env.CHATWOOT_BASE_URL || 'https://app.chatwoot.com').replace(/\/+$/, ''),
     chatwootAccountId: process.env.CHATWOOT_ACCOUNT_ID || '',

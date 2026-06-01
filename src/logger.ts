@@ -189,3 +189,18 @@ export function createLogger(module: string): Logger {
         error: (msg, meta?) => emit(LogLevel.ERROR, module, msg, meta),
     };
 }
+
+// ============ Shutdown ============
+
+/** 关闭日志文件流，确保最后几条 buffer 落盘。 */
+export function closeLogger(): Promise<void> {
+    return new Promise((resolve) => {
+        if (!logStream) {
+            resolve();
+            return;
+        }
+        const stream = logStream;
+        logStream = null;
+        stream.end(() => resolve());
+    });
+}

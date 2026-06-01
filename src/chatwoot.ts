@@ -4,33 +4,12 @@ import https from 'https';
 import FormData from 'form-data';
 import { config } from './config';
 import { createLogger, extractAxiosError } from './logger';
+import { KeyedMutex } from './mutex';
 import type { CannedResponse } from './types';
 
 const log = createLogger('chatwoot');
 
-export class KeyedMutex {
-    private locks = new Map<string, Promise<void>>();
-
-    async runExclusive<T>(key: string, task: () => Promise<T>): Promise<T> {
-        while (this.locks.has(key)) {
-            try {
-                await this.locks.get(key);
-            } catch { /* ignore */ }
-        }
-
-        let resolveLock!: () => void;
-        const lockPromise = new Promise<void>((r) => { resolveLock = r; });
-        this.locks.set(key, lockPromise);
-
-        try {
-            return await task();
-        } finally {
-            this.locks.delete(key);
-            resolveLock();
-        }
-    }
-}
-
+/** 对外暴露：同会话写操作互斥（顺序：发送 + 标记已读 + 状态切换 …） */
 export const conversationMutex = new KeyedMutex();
 
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
@@ -114,53 +93,46 @@ export function isSelfSentMessage(chatwootMessageId: number | undefined): boolea
 
 // ============ Messages ============
 
+/**
+ * 注意：mutex 只包提交动作本身（保证同会话写入顺序），不包 withRetry 重试。
+ * 这样 5xx 重试期间不会阻塞同会话的后续读写。
+ */
+async function postMessage(conversationId: number, body: Record<string, unknown>, label: string) {
+    const accountId = config.chatwootAccountId;
+    const url = `/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
+    const data = await withRetry(async () => {
+        const response = await client.post(url, body);
+        return response.data;
+    }, label);
+    if (data?.id) trackSentMessage(data.id);
+    return data;
+}
+
 export async function createMessage(conversationId: number, content: string) {
-    return conversationMutex.runExclusive(`conv_${conversationId}`, async () => {
-        log.debug('Creating message in Chatwoot', {
-            conversationId,
-            contentPreview: content.substring(0, 100) + (content.length > 100 ? '...' : ''),
-        });
-
-        const result = await withRetry(async () => {
-            const accountId = config.chatwootAccountId;
-            const url = `/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
-            const response = await client.post(url, {
-                content,
-                message_type: 'outgoing',
-                private: false,
-            });
-            if (response.data?.id) trackSentMessage(response.data.id);
-            return response.data;
-        }, `createMessage(conv=${conversationId})`);
-
-        log.info('Message created in Chatwoot', {
-            conversationId,
-            chatwootMessageId: result?.id,
-        });
-
-        return result;
+    log.debug('Creating message in Chatwoot', {
+        conversationId,
+        contentPreview: content.substring(0, 100) + (content.length > 100 ? '...' : ''),
     });
+
+    const result = await conversationMutex.runExclusive(`conv_${conversationId}`, () =>
+        postMessage(conversationId, { content, message_type: 'outgoing', private: false }, `createMessage(conv=${conversationId})`)
+    );
+
+    log.info('Message created in Chatwoot', { conversationId, chatwootMessageId: result?.id });
+    // 发送成功后主动关闭输入状态，避免后台一直显示"客服正在输入"
+    void toggleTypingStatus(conversationId, 'off');
+    return result;
 }
 
 export async function createPrivateNote(conversationId: number, content: string) {
-    return conversationMutex.runExclusive(`conv_${conversationId}`, async () => {
-        log.debug('Creating private note in Chatwoot', { conversationId });
+    log.debug('Creating private note in Chatwoot', { conversationId });
 
-        const result = await withRetry(async () => {
-            const accountId = config.chatwootAccountId;
-            const url = `/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
-            const response = await client.post(url, {
-                content,
-                message_type: 'outgoing',
-                private: true,
-            });
-            if (response.data?.id) trackSentMessage(response.data.id);
-            return response.data;
-        }, `createPrivateNote(conv=${conversationId})`);
+    const result = await conversationMutex.runExclusive(`conv_${conversationId}`, () =>
+        postMessage(conversationId, { content, message_type: 'outgoing', private: true }, `createPrivateNote(conv=${conversationId})`)
+    );
 
-        log.info('Private note created in Chatwoot', { conversationId, chatwootMessageId: result?.id });
-        return result;
-    });
+    log.info('Private note created in Chatwoot', { conversationId, chatwootMessageId: result?.id });
+    return result;
 }
 
 export async function createMessageWithAttachment(
@@ -168,18 +140,19 @@ export async function createMessageWithAttachment(
     content: string,
     attachment: { buffer: Buffer; filename: string; mimeType?: string }
 ) {
-    return conversationMutex.runExclusive(`conv_${conversationId}`, async () => {
-        log.debug('Creating message with attachment in Chatwoot', {
-            conversationId,
-            filename: attachment.filename,
-            mimeType: attachment.mimeType,
-            sizeBytes: attachment.buffer.length,
-        });
+    log.debug('Creating message with attachment in Chatwoot', {
+        conversationId,
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+        sizeBytes: attachment.buffer.length,
+    });
 
-        const result = await withRetry(async () => {
-            const accountId = config.chatwootAccountId;
-            const url = `/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
+    const result = await conversationMutex.runExclusive(`conv_${conversationId}`, async () => {
+        const accountId = config.chatwootAccountId;
+        const url = `/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
 
+        const data = await withRetry(async () => {
+            // FormData 必须每次重建：内部流不可重放，重试时复用会导致 0 字节请求
             const formData = new FormData();
             formData.append('content', content || '');
             formData.append('message_type', 'outgoing');
@@ -188,42 +161,44 @@ export async function createMessageWithAttachment(
                 filename: attachment.filename,
                 contentType: attachment.mimeType || 'application/octet-stream',
             });
-
             const response = await uploadClient.post(url, formData, {
                 headers: {
                     ...formData.getHeaders(),
                     'api_access_token': config.chatwootAccessToken,
                 },
             });
-            if (response.data?.id) trackSentMessage(response.data.id);
             return response.data;
         }, `createMessageWithAttachment(conv=${conversationId})`);
 
-        log.info('Attachment message created in Chatwoot', {
-            conversationId,
-            chatwootMessageId: result?.id,
-            filename: attachment.filename,
-        });
-        return result;
+        if (data?.id) trackSentMessage(data.id);
+        return data;
     });
+
+    log.info('Attachment message created in Chatwoot', {
+        conversationId,
+        chatwootMessageId: result?.id,
+        filename: attachment.filename,
+    });
+    void toggleTypingStatus(conversationId, 'off');
+    return result;
 }
 
 // ============ Conversation Status ============
 
 export async function toggleConversationStatus(conversationId: number, status: 'open' | 'resolved') {
-    return conversationMutex.runExclusive(`conv_${conversationId}`, async () => {
-        log.debug('Toggling conversation status', { conversationId, status });
+    log.debug('Toggling conversation status', { conversationId, status });
 
-        const result = await withRetry(async () => {
+    const result = await conversationMutex.runExclusive(`conv_${conversationId}`, () =>
+        withRetry(async () => {
             const accountId = config.chatwootAccountId;
             const url = `/api/v1/accounts/${accountId}/conversations/${conversationId}/toggle_status`;
             const response = await client.post(url, { status });
             return response.data;
-        }, `toggleStatus(conv=${conversationId}, status=${status})`);
+        }, `toggleStatus(conv=${conversationId}, status=${status})`)
+    );
 
-        log.info('Conversation status toggled', { conversationId, status });
-        return result;
-    });
+    log.info('Conversation status toggled', { conversationId, status });
+    return result;
 }
 
 // ============ Typing Status ============

@@ -148,3 +148,15 @@ export function deleteTopic(conversationId: number) {
 export function getTopicByTopicId(telegramTopicId: number) {
     return selectTopicByTopicIdStmt.get(telegramTopicId) as { chatwoot_conversation_id: number; chatwoot_account_id?: number; topic_name: string } | undefined;
 }
+
+// ============ Shutdown ============
+
+/** 优雅关闭 SQLite 连接（flush WAL，避免日志写半截）。 */
+export function closeDb() {
+    try {
+        db.close();
+        log.info('Database closed');
+    } catch (err) {
+        log.warn('Failed to close database', { error: String(err) });
+    }
+}
