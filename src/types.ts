@@ -128,10 +128,43 @@ export interface CannedResponse {
     content: string;
 }
 
+/** Chatwoot 自定义属性定义类型 */
+export type CustomAttributeType = 'text' | 'number' | 'currency' | 'percent' | 'link' | 'date' | 'list' | 'checkbox';
+
+/** Chatwoot 自定义属性定义（GET /api/v1/accounts/:id/custom_attribute_definitions） */
+export interface CustomAttributeDefinition {
+    id: number;
+    /** 中文显示名，如「账户余额」 */
+    attribute_display_name: string;
+    /** 字符串枚举类型 */
+    attribute_display_type: CustomAttributeType | string;
+    attribute_description?: string;
+    /** 英文键名，如「xboard_balance」 */
+    attribute_key: string;
+    attribute_values?: string[];
+    /** "conversation_attribute" | "contact_attribute" | "company_attribute" */
+    attribute_model: string;
+}
+
+/** Chatwoot 联系人 API 响应（简化版） */
+export interface ChatwootContactDetail {
+    id: number;
+    name?: string;
+    email?: string;
+    phone_number?: string;
+    identifier?: string;
+    thumbnail?: string;
+    additional_attributes?: ChatwootAdditionalAttributes;
+    custom_attributes?: Record<string, unknown>;
+    contact_inboxes?: Array<{ source_id?: string; inbox?: ChatwootInbox }>;
+}
+
 // ============ Contact Card Input ============
 
 /** 渲染欢迎卡片所需的完整联系人信息（从 webhook payload 中提取） */
 export interface ContactCardInfo {
+    /** 联系人 ID（用于按钮点击后调 API 拉详情） */
+    contactId?: number;
     name: string;
     email?: string;
     phoneNumber?: string;

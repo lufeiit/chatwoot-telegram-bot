@@ -6,9 +6,11 @@ import {
     renderForwardedMessage,
     extractSenderName,
     markdownToTelegramHtml,
+    formatCustomAttributeValue,
+    renderContactDetailMessage,
     __test__,
 } from '../formatters';
-import type { ChatwootMessageEvent } from '../types';
+import type { ChatwootMessageEvent, ChatwootContactDetail, CustomAttributeDefinition } from '../types';
 
 describe('escapeHtml', () => {
     it('escapes & < > but leaves quotes', () => {
@@ -48,6 +50,7 @@ describe('extractContactCard', () => {
             message_type: 'incoming',
             content: 'hi',
             sender: {
+                id: 42,
                 type: 'contact',
                 name: '张三',
                 email: 'foo@bar.com',
@@ -80,6 +83,7 @@ describe('extractContactCard', () => {
         };
 
         const card = extractContactCard(event);
+        expect(card.contactId).toBe(42);
         expect(card.name).toBe('张三');
         expect(card.email).toBe('foo@bar.com');
         expect(card.phoneNumber).toBe('+8613800138000');
@@ -213,6 +217,114 @@ describe('renderForwardedMessage', () => {
         });
         expect(text).not.toContain('📎');
         expect(text).toContain('🤖');
+    });
+});
+
+describe('formatCustomAttributeValue', () => {
+    it('returns — for empty values', () => {
+        expect(formatCustomAttributeValue(null, 'text')).toBe('—');
+        expect(formatCustomAttributeValue('', 'text')).toBe('—');
+        expect(formatCustomAttributeValue(undefined, 'number')).toBe('—');
+    });
+    it('formats text/number/list as plain escaped string', () => {
+        expect(formatCustomAttributeValue('hello <a>', 'text')).toBe('hello &lt;a&gt;');
+        expect(formatCustomAttributeValue(42, 'number')).toBe('42');
+        expect(formatCustomAttributeValue('vip', 'list')).toBe('vip');
+    });
+    it('prefixes currency with ¥', () => {
+        expect(formatCustomAttributeValue(100, 'currency')).toBe('¥100');
+    });
+    it('suffixes percent with %', () => {
+        expect(formatCustomAttributeValue(75, 'percent')).toBe('75%');
+    });
+    it('renders link as clickable <a>', () => {
+        expect(formatCustomAttributeValue('https://e.com/a?x=1&y=2', 'link'))
+            .toBe('<a href="https://e.com/a?x=1&amp;y=2">https://e.com/a?x=1&amp;y=2</a>');
+    });
+    it('formats checkbox as ✅/❌', () => {
+        expect(formatCustomAttributeValue(true, 'checkbox')).toBe('✅');
+        expect(formatCustomAttributeValue('true', 'checkbox')).toBe('✅');
+        expect(formatCustomAttributeValue(1, 'checkbox')).toBe('✅');
+        expect(formatCustomAttributeValue(false, 'checkbox')).toBe('❌');
+        expect(formatCustomAttributeValue('false', 'checkbox')).toBe('❌');
+    });
+    it('formats date from ISO or unix timestamp', () => {
+        expect(formatCustomAttributeValue('2024-06-02T12:00:00Z', 'date')).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+        expect(formatCustomAttributeValue(1717286400, 'date')).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    });
+    it('falls back to escaped string for unknown type', () => {
+        expect(formatCustomAttributeValue('x<>', 'unknown_type')).toBe('x&lt;&gt;');
+    });
+});
+
+describe('renderContactDetailMessage', () => {
+    const definitions: CustomAttributeDefinition[] = [
+        { id: 1, attribute_display_name: 'Xboard 状态', attribute_display_type: 'list', attribute_key: 'xboard_status', attribute_model: 'contact_attribute' },
+        { id: 2, attribute_display_name: '账户余额', attribute_display_type: 'currency', attribute_key: 'xboard_balance', attribute_model: 'contact_attribute' },
+        { id: 3, attribute_display_name: '已用流量(GB)', attribute_display_type: 'number', attribute_key: 'xboard_used_gb', attribute_model: 'contact_attribute' },
+        { id: 4, attribute_display_name: '订阅链接', attribute_display_type: 'link', attribute_key: 'xboard_subscribe_url', attribute_model: 'contact_attribute' },
+        { id: 5, attribute_display_name: 'Xboard 同步时间', attribute_display_type: 'date', attribute_key: 'xboard_synced_at', attribute_model: 'contact_attribute' },
+    ];
+
+    it('renders contact with custom attributes using Chinese display names', () => {
+        const contact: ChatwootContactDetail = {
+            id: 9,
+            name: 'shannon804',
+            email: 'shannon804@gmail.com',
+            additional_attributes: {
+                country: '德国',
+                city: '柏林',
+                created_at_ip: '188.253.117.27',
+                browser: { browser_name: 'Safari', browser_version: '26.5', platform_name: 'macOS' },
+                browser_language: 'zh',
+            },
+            custom_attributes: {
+                xboard_status: 'no_account',
+                xboard_balance: 0,
+                xboard_used_gb: 0,
+                xboard_subscribe_url: 'https://sub.example.com/abc',
+                xboard_synced_at: '2026-06-02T12:00:00Z',
+            },
+        };
+        const text = renderContactDetailMessage(contact, definitions);
+        expect(text).toContain('<b>shannon804</b>');
+        expect(text).toContain('📧 shannon804@gmail.com');
+        expect(text).toContain('德国 · 柏林');
+        expect(text).toContain('Safari 26.5 · macOS');
+        // 自定义属性用中文显示名
+        expect(text).toContain('<b>Xboard 状态</b>：no_account');
+        expect(text).toContain('<b>账户余额</b>：¥0');
+        expect(text).toContain('<b>已用流量(GB)</b>：0');
+        expect(text).toContain('<b>订阅链接</b>：<a href="https://sub.example.com/abc">https://sub.example.com/abc</a>');
+        expect(text).toMatch(/<b>Xboard 同步时间<\/b>：\d{4}-\d{2}-\d{2}/);
+    });
+
+    it('falls back to raw key when no definition matches', () => {
+        const contact: ChatwootContactDetail = {
+            id: 1,
+            name: 'A',
+            custom_attributes: { unknown_field: 'value' },
+        };
+        const text = renderContactDetailMessage(contact, definitions);
+        expect(text).toContain('<code>unknown_field</code>：value');
+    });
+
+    it('skips empty custom attribute section when nothing to show', () => {
+        const contact: ChatwootContactDetail = { id: 1, name: 'A', email: 'a@b.com' };
+        const text = renderContactDetailMessage(contact, definitions);
+        expect(text).not.toContain('客户自定义属性');
+    });
+
+    it('skips empty or null attribute values', () => {
+        const contact: ChatwootContactDetail = {
+            id: 1,
+            name: 'A',
+            custom_attributes: { xboard_status: 'active', xboard_balance: null, xboard_used_gb: '' },
+        };
+        const text = renderContactDetailMessage(contact, definitions);
+        expect(text).toContain('Xboard 状态');
+        expect(text).not.toContain('账户余额');
+        expect(text).not.toContain('已用流量');
     });
 });
 

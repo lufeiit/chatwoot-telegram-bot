@@ -5,7 +5,7 @@ import FormData from 'form-data';
 import { config } from './config';
 import { createLogger, extractAxiosError } from './logger';
 import { KeyedMutex } from './mutex';
-import type { CannedResponse } from './types';
+import type { CannedResponse, CustomAttributeDefinition, ChatwootContactDetail } from './types';
 
 const log = createLogger('chatwoot');
 
@@ -212,6 +212,59 @@ export async function toggleTypingStatus(conversationId: number, typingStatus: '
     } catch (error) {
         log.debug('Failed to toggle typing status (non-critical)', { conversationId, typingStatus, ...extractAxiosError(error) });
     }
+}
+
+// ============ Custom Attribute Definitions (with cache) ============
+
+/**
+ * 属性定义变化频率极低，缓存 10 分钟。
+ * 分别缓存 contact_attribute 和 conversation_attribute。
+ */
+const CAD_CACHE_TTL_MS = 10 * 60 * 1000;
+const cadCache = new Map<string, { data: CustomAttributeDefinition[]; ts: number }>();
+
+export async function getCustomAttributeDefinitions(
+    model: 'contact_attribute' | 'conversation_attribute' = 'contact_attribute'
+): Promise<CustomAttributeDefinition[]> {
+    const cached = cadCache.get(model);
+    if (cached && Date.now() - cached.ts < CAD_CACHE_TTL_MS) {
+        return cached.data;
+    }
+
+    try {
+        const data = await withRetry(async () => {
+            const accountId = config.chatwootAccountId;
+            const url = `/api/v1/accounts/${accountId}/custom_attribute_definitions`;
+            const response = await client.get<CustomAttributeDefinition[]>(url, {
+                params: { attribute_model: model },
+            });
+            return response.data;
+        }, `getCustomAttributeDefinitions(${model})`);
+
+        cadCache.set(model, { data, ts: Date.now() });
+        log.debug('Fetched custom attribute definitions', { model, count: data.length });
+        return data;
+    } catch (err) {
+        log.warn('Failed to fetch custom attribute definitions, using cache or empty', {
+            model,
+            ...extractAxiosError(err),
+        });
+        return cached?.data || [];
+    }
+}
+
+// ============ Contact Detail (按需拉取联系人完整资料) ============
+
+/** 拉取联系人完整资料（不缓存：点击按钮才调，要拿到最新值） */
+export async function getContact(contactId: number): Promise<ChatwootContactDetail> {
+    return withRetry(async () => {
+        const accountId = config.chatwootAccountId;
+        const url = `/api/v1/accounts/${accountId}/contacts/${contactId}`;
+        const response = await client.get<{ payload?: ChatwootContactDetail } | ChatwootContactDetail>(url);
+        // Chatwoot v3 包了一层 payload，v2 直接返回
+        const body = response.data as { payload?: ChatwootContactDetail };
+        return body.payload ?? (response.data as ChatwootContactDetail);
+    }, `getContact(${contactId})`);
 }
 
 // ============ Canned Responses (with short-lived cache) ============

@@ -1,3 +1,4 @@
+import type { InlineKeyboardButton } from 'telegraf/types';
 import { bot } from './bot-instance';
 import { config } from './config';
 import { saveTopic, getTopic, deleteTopic } from './database';
@@ -7,18 +8,20 @@ import type { ContactCardInfo } from './types';
 
 const log = createLogger('topics');
 
-export function buildForumInlineKeyboard(conversationId: number, accountId: number) {
-    return {
-        inline_keyboard: [
-            [
-                { text: '✅ 标记已解决', callback_data: `r:${conversationId}:${accountId}` },
-                { text: '🔓 重新打开', callback_data: `o:${conversationId}:${accountId}` },
-            ],
-            [
-                { text: '📱 在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` },
-            ],
+export function buildForumInlineKeyboard(conversationId: number, accountId: number, contactId?: number) {
+    const rows: InlineKeyboardButton[][] = [
+        [
+            { text: '✅ 标记已解决', callback_data: `r:${conversationId}:${accountId}` },
+            { text: '🔓 重新打开', callback_data: `o:${conversationId}:${accountId}` },
         ],
-    };
+        [
+            { text: '📱 在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` },
+        ],
+    ];
+    if (contactId) {
+        rows.push([{ text: '📋 客户详细资料', callback_data: `c:${contactId}:${accountId}` }]);
+    }
+    return { inline_keyboard: rows };
 }
 
 export function buildLegacyKeyboard(conversationId: number, accountId: number) {
@@ -75,7 +78,7 @@ async function sendContactCard(
             message_thread_id: topicId,
             parse_mode: 'HTML',
             link_preview_options: { is_disabled: true },
-            reply_markup: buildForumInlineKeyboard(conversationId, accountId),
+            reply_markup: buildForumInlineKeyboard(conversationId, accountId, contactInfo.contactId),
         });
     } catch (err) {
         log.error('Failed to send contact card', { topicId, error: String(err) });

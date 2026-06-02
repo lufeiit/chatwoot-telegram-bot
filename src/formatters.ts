@@ -1,4 +1,11 @@
-import type { ChatwootMessageEvent, ContactCardInfo, ChatwootSender } from './types';
+import type {
+    ChatwootMessageEvent,
+    ContactCardInfo,
+    ChatwootSender,
+    ChatwootContactDetail,
+    CustomAttributeDefinition,
+    CustomAttributeType,
+} from './types';
 
 // ============ HTML Escaping ============
 
@@ -138,6 +145,7 @@ export function extractContactCard(event: ChatwootMessageEvent): ContactCardInfo
     const initiatedAt = parseTimestamp(initiatedAtRaw);
 
     return {
+        contactId: contact?.id ?? metaSender?.id,
         name,
         email: contact?.email || metaSender?.email,
         phoneNumber: contact?.phone_number || metaSender?.phone_number,
@@ -233,17 +241,121 @@ export function renderContactCard(info: ContactCardInfo, conversationId: number)
         lines.push(`🏷️ ${info.labels.map((l) => escapeHtml(l)).join(' · ')}`);
     }
 
-    if (info.customAttributes && Object.keys(info.customAttributes).length > 0) {
-        const ca = Object.entries(info.customAttributes)
-            .filter(([, v]) => v != null && v !== '')
-            .slice(0, 5)
-            .map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(String(v))}`)
-            .join(', ');
-        if (ca) lines.push(`📝 ${ca}`);
+    // 自定义属性不在卡片里铺开（避免堆成一团乱码），改由「📋 客户详细资料」按钮按需展开
+    const customCount = info.customAttributes ? Object.keys(info.customAttributes).filter((k) => {
+        const v = (info.customAttributes as Record<string, unknown>)[k];
+        return v != null && v !== '';
+    }).length : 0;
+    if (customCount > 0) {
+        lines.push(`📊 自定义属性 ${customCount} 项（点击下方「客户详细资料」按钮查看）`);
     }
 
     lines.push('');
     lines.push('💬 <i>点击下方按钮管理此对话</i>');
+
+    return lines.join('\n');
+}
+
+// ============ Custom Attributes Formatting ============
+
+/**
+ * 按 Chatwoot 自定义属性类型格式化值。
+ * - text/list/number 原样显示
+ * - currency 加 ¥ 前缀
+ * - percent 加 % 后缀
+ * - link 渲染为可点击链接
+ * - date 按 yyyy-MM-dd 显示
+ * - checkbox 转 ✅/❌
+ */
+export function formatCustomAttributeValue(value: unknown, type: CustomAttributeType | string): string {
+    if (value == null || value === '') return '—';
+
+    switch (type) {
+        case 'currency':
+            return `¥${escapeHtml(String(value))}`;
+        case 'percent':
+            return `${escapeHtml(String(value))}%`;
+        case 'link': {
+            const url = String(value);
+            return `<a href="${escapeHtml(url)}">${escapeHtml(url)}</a>`;
+        }
+        case 'date': {
+            const ts = parseTimestamp(value);
+            if (ts) {
+                const d = new Date(ts * 1000);
+                const pad = (n: number) => String(n).padStart(2, '0');
+                return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+            }
+            return escapeHtml(String(value));
+        }
+        case 'checkbox':
+            return value === true || value === 'true' || value === 1 ? '✅' : '❌';
+        case 'number':
+        case 'text':
+        case 'list':
+        default:
+            return escapeHtml(String(value));
+    }
+}
+
+/**
+ * 渲染「客户详细资料」消息：联系人完整资料 + 按中文名翻译的自定义属性。
+ * 没有 definitions 时降级显示原始键名。
+ */
+export function renderContactDetailMessage(
+    contact: ChatwootContactDetail,
+    definitions: CustomAttributeDefinition[],
+): string {
+    const lines: string[] = [];
+    lines.push(`👤 <b>${escapeHtml(contact.name || '匿名联系人')}</b>`);
+    lines.push('━━━━━━━━━━━━━━━━');
+
+    // 基础信息
+    if (contact.email) lines.push(`📧 ${escapeHtml(contact.email)}`);
+    if (contact.phone_number) lines.push(`📞 ${escapeHtml(contact.phone_number)}`);
+    if (contact.identifier) lines.push(`🆔 ${escapeHtml(contact.identifier)}`);
+
+    // 额外属性（country / city / browser / referer 等系统字段）
+    const a = contact.additional_attributes || {};
+    const locationParts: string[] = [];
+    if (typeof a.country === 'string') locationParts.push(a.country);
+    if (typeof a.city === 'string') locationParts.push(a.city);
+    if (locationParts.length > 0) lines.push(`📍 ${escapeHtml(locationParts.join(' · '))}`);
+    if (typeof a.created_at_ip === 'string') lines.push(`🌐 IP：${escapeHtml(a.created_at_ip)}`);
+    if (a.browser?.browser_name) {
+        const browser = a.browser.browser_version ? `${a.browser.browser_name} ${a.browser.browser_version}` : a.browser.browser_name;
+        const platform = a.browser.platform_name ? ` · ${a.browser.platform_name}` : '';
+        lines.push(`💻 ${escapeHtml(browser)}${escapeHtml(platform)}`);
+    }
+    if (typeof a.browser_language === 'string') lines.push(`🗣️ ${escapeHtml(a.browser_language)}`);
+
+    // 自定义属性区
+    const custom = contact.custom_attributes || {};
+    const customKeys = Object.keys(custom).filter((k) => custom[k] != null && custom[k] !== '');
+
+    if (customKeys.length > 0) {
+        lines.push('');
+        lines.push('📊 <b>客户自定义属性</b>');
+
+        // 用 attribute_key → definition 建索引
+        const defByKey = new Map<string, CustomAttributeDefinition>();
+        for (const def of definitions) defByKey.set(def.attribute_key, def);
+
+        // 按 definition 顺序渲染（保证管理员配置的顺序），再追加未定义的
+        const rendered = new Set<string>();
+        for (const def of definitions) {
+            if (!customKeys.includes(def.attribute_key)) continue;
+            const value = custom[def.attribute_key];
+            const formatted = formatCustomAttributeValue(value, def.attribute_display_type);
+            lines.push(`• <b>${escapeHtml(def.attribute_display_name)}</b>：${formatted}`);
+            rendered.add(def.attribute_key);
+        }
+        // 未定义的（webhook 里有但管理员没配 definition）
+        for (const key of customKeys) {
+            if (rendered.has(key)) continue;
+            lines.push(`• <code>${escapeHtml(key)}</code>：${escapeHtml(String(custom[key]))}`);
+        }
+    }
 
     return lines.join('\n');
 }

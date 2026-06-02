@@ -4,8 +4,16 @@ import { config } from './config';
 import { createLogger, extractAxiosError } from './logger';
 import { bot } from './bot-instance';
 import { getMapping, getTopic } from './database';
-import { toggleConversationStatus, createMessage, toggleTypingStatus, getCannedResponses } from './chatwoot';
+import {
+    toggleConversationStatus,
+    createMessage,
+    toggleTypingStatus,
+    getCannedResponses,
+    getContact,
+    getCustomAttributeDefinitions,
+} from './chatwoot';
 import { buildForumInlineKeyboard, reopenTopicForConversation } from './topics';
+import { renderContactDetailMessage } from './formatters';
 
 const log = createLogger('callback');
 
@@ -115,6 +123,36 @@ addRoute('r:', async (ctx, parts) => {
 // Forum mode: reopen conversation. format: "o:<conversationId>:<accountId>"
 addRoute('o:', async (ctx, parts) => {
     await handleStatusToggle(ctx, parts, 'open');
+});
+
+// Contact detail: fetch contact + custom attribute definitions, post a detail message.
+// format: "c:<contactId>:<accountId>"
+addRoute('c:', async (ctx, parts) => {
+    const contactId = parseInt(parts[1], 10);
+    if (!contactId) {
+        await ctx.answerCbQuery('参数错误');
+        return;
+    }
+
+    try {
+        await ctx.answerCbQuery('正在获取联系人详细资料...');
+        // 并发拉取联系人 + 自定义属性定义
+        const [contact, definitions] = await Promise.all([
+            getContact(contactId),
+            getCustomAttributeDefinitions('contact_attribute'),
+        ]);
+
+        const text = renderContactDetailMessage(contact, definitions);
+        const messageThreadId = (ctx.callbackQuery.message as Message & { message_thread_id?: number })?.message_thread_id;
+        await ctx.reply(text, {
+            parse_mode: 'HTML',
+            link_preview_options: { is_disabled: true },
+            ...(messageThreadId ? { message_thread_id: messageThreadId } : {}),
+        });
+    } catch (err) {
+        log.error('Failed to fetch contact detail', { contactId, ...extractAxiosError(err) });
+        try { await ctx.answerCbQuery('❌ 获取联系人详细资料失败'); } catch { /* already answered */ }
+    }
 });
 
 // Forum mode: close topic. format: "close_topic:<conversationId>"
