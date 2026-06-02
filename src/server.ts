@@ -180,7 +180,7 @@ async function handleMessageCreated(event: ChatwootMessageEvent) {
     });
 
     const replyMarkup = isForumMode
-        ? buildForumInlineKeyboard(conversationId, accountId)
+        ? buildForumInlineKeyboard(conversationId, accountId, contactCard.contactId)
         : buildLegacyKeyboard(conversationId, accountId);
 
     const sendOptions = {

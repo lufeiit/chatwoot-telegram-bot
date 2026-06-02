@@ -10,10 +10,13 @@ import type { ContactCardInfo, CustomAttributeDefinition } from './types';
 const log = createLogger('topics');
 
 export function buildForumInlineKeyboard(conversationId: number, accountId: number, contactId?: number) {
+    // r:/o: callback_data 末尾也带 contactId（可选第 4 段），
+    // 这样点击「标记已解决」/「重新打开」后重建按钮时不丢失「刷新最新资料」按钮。
+    const contactSuffix = contactId ? `:${contactId}` : '';
     const rows: InlineKeyboardButton[][] = [
         [
-            { text: '✅ 标记已解决', callback_data: `r:${conversationId}:${accountId}` },
-            { text: '🔓 重新打开', callback_data: `o:${conversationId}:${accountId}` },
+            { text: '✅ 标记已解决', callback_data: `r:${conversationId}:${accountId}${contactSuffix}` },
+            { text: '🔓 重新打开', callback_data: `o:${conversationId}:${accountId}${contactSuffix}` },
         ],
         [
             { text: '📱 在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` },

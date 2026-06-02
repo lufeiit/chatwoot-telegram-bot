@@ -198,6 +198,8 @@ addRoute('resolve', async (ctx) => {
 async function handleStatusToggle(ctx: CallbackContext, parts: string[], target: 'resolved' | 'open') {
     const conversationId = parseInt(parts[1], 10);
     const accountId = parseInt(parts[2], 10);
+    // 兼容旧 callback_data（只有 3 段）：parts[3] 不存在时 contactId 为 undefined
+    const contactId = parts[3] ? parseInt(parts[3], 10) : undefined;
     if (!conversationId) return;
 
     try {
@@ -217,7 +219,7 @@ async function handleStatusToggle(ctx: CallbackContext, parts: string[], target:
         try {
             await ctx.editMessageText(updatedText, {
                 parse_mode: 'HTML',
-                reply_markup: buildForumInlineKeyboard(conversationId, accountId),
+                reply_markup: buildForumInlineKeyboard(conversationId, accountId, contactId),
                 link_preview_options: { is_disabled: true },
             });
         } catch {
