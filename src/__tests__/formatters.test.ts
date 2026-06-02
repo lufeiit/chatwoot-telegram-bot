@@ -5,6 +5,7 @@ import {
     renderContactCard,
     renderForwardedMessage,
     extractSenderName,
+    markdownToTelegramHtml,
     __test__,
 } from '../formatters';
 import type { ChatwootMessageEvent } from '../types';
@@ -174,18 +175,33 @@ describe('renderContactCard', () => {
 });
 
 describe('renderForwardedMessage', () => {
-    it('escapes Markdown-special characters safely', () => {
+    it('renders Markdown in content while keeping sender name safe', () => {
         const text = renderForwardedMessage({
             messageType: 'incoming',
             senderName: '张_三*',
             senderEmail: 'a@b.com',
-            content: 'hello *world* `code` _under_ <tag>',
+            content: '请看 **重要内容** 和 [点此查看](https://e.com)',
             attachmentCount: 2,
         });
-        // Markdown 特殊字符不再触发解析错误（用 HTML 模式）
-        expect(text).toContain('张_三*');
-        expect(text).toContain('hello *world* `code` _under_ &lt;tag&gt;');
+        // 姓名只 escape，不解释 Markdown
+        expect(text).toContain('<b>张_三*</b>');
+        expect(text).toContain('(a@b.com)');
+        // 正文里的 Markdown 应被转换成 HTML
+        expect(text).toContain('<b>重要内容</b>');
+        expect(text).toContain('<a href="https://e.com">点此查看</a>');
         expect(text).toContain('📎 附件：2 个');
+    });
+
+    it('escapes HTML in content but keeps Markdown formatting', () => {
+        const text = renderForwardedMessage({
+            messageType: 'outgoing',
+            senderName: '客服',
+            content: '代码: `<script>` 还有 **加粗**',
+            attachmentCount: 0,
+        });
+        expect(text).not.toContain('<script>');
+        expect(text).toContain('<code>&lt;script&gt;</code>');
+        expect(text).toContain('<b>加粗</b>');
     });
 
     it('omits attachment hint when count is 0', () => {
@@ -197,6 +213,73 @@ describe('renderForwardedMessage', () => {
         });
         expect(text).not.toContain('📎');
         expect(text).toContain('🤖');
+    });
+});
+
+describe('markdownToTelegramHtml', () => {
+    it('returns empty string for empty input', () => {
+        expect(markdownToTelegramHtml('')).toBe('');
+    });
+
+    it('escapes HTML special chars before converting', () => {
+        expect(markdownToTelegramHtml('<a>&b</a>')).toBe('&lt;a&gt;&amp;b&lt;/a&gt;');
+    });
+
+    it('converts bold **text**', () => {
+        expect(markdownToTelegramHtml('hello **world** ok'))
+            .toBe('hello <b>world</b> ok');
+    });
+
+    it('converts links [text](url)', () => {
+        expect(markdownToTelegramHtml('see [docs](https://e.com/x?a=1&b=2)'))
+            .toBe('see <a href="https://e.com/x?a=1&amp;b=2">docs</a>');
+    });
+
+    it('converts inline code', () => {
+        expect(markdownToTelegramHtml('use `npm ci` for clean install'))
+            .toBe('use <code>npm ci</code> for clean install');
+    });
+
+    it('converts fenced code block with language hint', () => {
+        const result = markdownToTelegramHtml('```ts\nconst x = 1;\n```');
+        expect(result).toBe('<pre>const x = 1;</pre>');
+    });
+
+    it('does not interpret markdown inside code blocks', () => {
+        const result = markdownToTelegramHtml('`**not bold**`');
+        expect(result).toBe('<code>**not bold**</code>');
+    });
+
+    it('does not interpret * _ inside link URLs', () => {
+        const result = markdownToTelegramHtml('see [a_b](https://e.com/_underscore_*x*)');
+        expect(result).toContain('<a href="https://e.com/_underscore_*x*">a_b</a>');
+        expect(result).not.toContain('<i>');
+    });
+
+    it('handles italic *text* without confusing with bold', () => {
+        expect(markdownToTelegramHtml('plain *italic* end'))
+            .toBe('plain <i>italic</i> end');
+    });
+
+    it('does not break snake_case identifiers with _', () => {
+        const result = markdownToTelegramHtml('use foo_bar_baz here');
+        expect(result).toBe('use foo_bar_baz here');
+    });
+
+    it('converts strikethrough ~~text~~', () => {
+        expect(markdownToTelegramHtml('~~old~~ new')).toBe('<s>old</s> new');
+    });
+
+    it('handles a real-world Chatwoot AI reply with mixed markdown', () => {
+        const input = '您好，我是 **苏菲**！请参考 [使用教程](https://e.com/help)，**节点异常**请看 [此处](https://e.com/x)';
+        const result = markdownToTelegramHtml(input);
+        expect(result).toContain('<b>苏菲</b>');
+        expect(result).toContain('<a href="https://e.com/help">使用教程</a>');
+        expect(result).toContain('<b>节点异常</b>');
+        expect(result).toContain('<a href="https://e.com/x">此处</a>');
+        // 不应留下任何原始 Markdown 标记
+        expect(result).not.toContain('**');
+        expect(result).not.toContain('](');
     });
 });
 

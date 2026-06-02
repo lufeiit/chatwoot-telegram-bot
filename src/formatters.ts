@@ -1,4 +1,4 @@
-import type { ChatwootMessageEvent, ContactCardInfo, ChatwootSender, ChatwootConversation, ChatwootInbox } from './types';
+import type { ChatwootMessageEvent, ContactCardInfo, ChatwootSender } from './types';
 
 // ============ HTML Escaping ============
 
@@ -28,6 +28,66 @@ export function italic(text: string): string {
 export function link(text: string, url: string): string {
     // URL 中包含 & 时也需转义为 &amp;
     return `<a href="${escapeHtml(url)}">${escapeHtml(text)}</a>`;
+}
+
+// ============ Markdown → Telegram HTML ============
+
+/**
+ * 把 Chatwoot 中常见的 Markdown 子集转换成 Telegram 支持的 HTML 标签。
+ *
+ * Telegram HTML 支持的标签（已涵盖）：
+ *   <b> <i> <u> <s> <code> <pre> <a> <blockquote>
+ *
+ * 处理顺序很关键：先用占位符保护代码块和链接，再处理 bold/italic/strike，
+ * 最后还原占位符。避免代码块/链接里的 `*` `_` 被误当作 Markdown 语法。
+ */
+export function markdownToTelegramHtml(md: string): string {
+    if (!md) return '';
+
+    // 先 HTML escape 一次。后续插入的标签是直接拼接，不会被二次 escape。
+    let text = escapeHtml(md);
+
+    // 1. 围栏代码块 ```lang?\n...\n``` —— 用占位符保护，内容不再二次处理
+    const codeBlocks: string[] = [];
+    text = text.replace(/```(?:[a-zA-Z0-9_-]+)?\n?([\s\S]*?)```/g, (_match, code: string) => {
+        const idx = codeBlocks.length;
+        codeBlocks.push(`<pre>${code.replace(/\n+$/, '')}</pre>`);
+        return ` __CB${idx}__ `;
+    });
+
+    // 2. 行内代码 `code`
+    const inlineCodes: string[] = [];
+    text = text.replace(/`([^`\n]+)`/g, (_match, code: string) => {
+        const idx = inlineCodes.length;
+        inlineCodes.push(`<code>${code}</code>`);
+        return ` __IC${idx}__ `;
+    });
+
+    // 3. 链接 [text](url) —— 整段也用占位符保护，避免 URL 里的 * _ 被后续误处理
+    //    （escapeHtml 已把 url 中的 & 转成 &amp;，可直接拼入 href）
+    const links: string[] = [];
+    text = text.replace(/\[([^\]\n]+)\]\(([^)\n\s]+)\)/g, (_match, linkText: string, url: string) => {
+        const idx = links.length;
+        links.push(`<a href="${url}">${linkText}</a>`);
+        return ` __LK${idx}__ `;
+    });
+
+    // 4. 加粗 **text** （在斜体之前；不允许跨行；非贪婪）
+    text = text.replace(/\*\*([^*\n][^*\n]*?)\*\*/g, '<b>$1</b>');
+
+    // 5. 斜体 *text*（避免 ** 残留被误吃）和 _text_（要求两侧不是单词字符，避免 snake_case 误伤）
+    text = text.replace(/(^|[^*\w])\*([^*\n]+?)\*(?!\*)/g, '$1<i>$2</i>');
+    text = text.replace(/(^|[^\w])_([^_\n]+?)_(?!\w)/g, '$1<i>$2</i>');
+
+    // 6. 删除线 ~~text~~
+    text = text.replace(/~~([^~\n]+?)~~/g, '<s>$1</s>');
+
+    // 7. 按相反顺序还原占位符
+    text = text.replace(/ __LK(\d+)__ /g, (_m, i: string) => links[Number(i)] ?? '');
+    text = text.replace(/ __IC(\d+)__ /g, (_m, i: string) => inlineCodes[Number(i)] ?? '');
+    text = text.replace(/ __CB(\d+)__ /g, (_m, i: string) => codeBlocks[Number(i)] ?? '');
+
+    return text;
 }
 
 // ============ Channel Name Mapping ============
@@ -192,7 +252,9 @@ export function renderContactCard(info: ContactCardInfo, conversationId: number)
 
 /**
  * 渲染转发到 Telegram 的单条消息文本。
- * 使用 HTML parse_mode 避免 Markdown 注入。
+ * - 元数据（姓名、邮箱）只做 HTML escape，避免 Markdown 误解释
+ * - 消息正文用 markdownToTelegramHtml，让 Chatwoot AI/客服回复里的
+ *   **bold**、[text](url)、`code` 等格式在 Telegram 端正常渲染
  */
 export function renderForwardedMessage(params: {
     messageType: 'incoming' | 'outgoing';
@@ -204,7 +266,7 @@ export function renderForwardedMessage(params: {
     const { messageType, senderName, senderEmail, content, attachmentCount } = params;
     const safeName = escapeHtml(senderName);
     const safeEmail = senderEmail ? ` (${escapeHtml(senderEmail)})` : '';
-    const safeBody = escapeHtml(content);
+    const safeBody = markdownToTelegramHtml(content);
     const attachmentHint = attachmentCount > 0 ? `\n📎 附件：${attachmentCount} 个` : '';
 
     if (messageType === 'incoming') {
