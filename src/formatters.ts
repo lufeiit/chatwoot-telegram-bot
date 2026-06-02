@@ -195,8 +195,15 @@ function formatTimestamp(seconds: number): string {
 /**
  * 渲染联系人完整卡片（HTML 格式，可直接作为 sendMessage 内容）。
  * 自动隐藏空字段。
+ *
+ * @param definitions 自定义属性定义列表（含中文 display_name + 类型）。
+ *                    传空数组时降级用英文键名渲染。
  */
-export function renderContactCard(info: ContactCardInfo, conversationId: number): string {
+export function renderContactCard(
+    info: ContactCardInfo,
+    conversationId: number,
+    definitions: CustomAttributeDefinition[] = [],
+): string {
     const lines: string[] = [];
     lines.push(`👤 <b>${escapeHtml(info.name)}</b>  <code>#${conversationId}</code>`);
     lines.push('━━━━━━━━━━━━━━━━');
@@ -241,13 +248,31 @@ export function renderContactCard(info: ContactCardInfo, conversationId: number)
         lines.push(`🏷️ ${info.labels.map((l) => escapeHtml(l)).join(' · ')}`);
     }
 
-    // 自定义属性不在卡片里铺开（避免堆成一团乱码），改由「📋 客户详细资料」按钮按需展开
-    const customCount = info.customAttributes ? Object.keys(info.customAttributes).filter((k) => {
-        const v = (info.customAttributes as Record<string, unknown>)[k];
+    // 自定义属性：按中文 display_name + 类型化的值直接展示在卡片里。
+    // 没有 definitions 时降级显示原始键名（按钮可用于刷新）。
+    const custom = info.customAttributes || {};
+    const customKeys = Object.keys(custom).filter((k) => {
+        const v = custom[k];
         return v != null && v !== '';
-    }).length : 0;
-    if (customCount > 0) {
-        lines.push(`📊 自定义属性 ${customCount} 项（点击下方「客户详细资料」按钮查看）`);
+    });
+    if (customKeys.length > 0) {
+        lines.push('');
+        lines.push('📊 <b>客户自定义属性</b>');
+
+        const rendered = new Set<string>();
+        // 按 definition 顺序优先（保留 Chatwoot 后台的配置顺序）
+        for (const def of definitions) {
+            if (!customKeys.includes(def.attribute_key)) continue;
+            const value = custom[def.attribute_key];
+            const formatted = formatCustomAttributeValue(value, def.attribute_display_type);
+            lines.push(`• <b>${escapeHtml(def.attribute_display_name)}</b>：${formatted}`);
+            rendered.add(def.attribute_key);
+        }
+        // 未配定义的属性降级显示键名（不丢数据）
+        for (const key of customKeys) {
+            if (rendered.has(key)) continue;
+            lines.push(`• <code>${escapeHtml(key)}</code>：${escapeHtml(String(custom[key]))}`);
+        }
     }
 
     lines.push('');

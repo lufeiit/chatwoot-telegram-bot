@@ -4,7 +4,8 @@ import { config } from './config';
 import { saveTopic, getTopic, deleteTopic } from './database';
 import { createLogger } from './logger';
 import { renderContactCard } from './formatters';
-import type { ContactCardInfo } from './types';
+import { getCustomAttributeDefinitions } from './chatwoot';
+import type { ContactCardInfo, CustomAttributeDefinition } from './types';
 
 const log = createLogger('topics');
 
@@ -19,7 +20,7 @@ export function buildForumInlineKeyboard(conversationId: number, accountId: numb
         ],
     ];
     if (contactId) {
-        rows.push([{ text: '📋 客户详细资料', callback_data: `c:${contactId}:${accountId}` }]);
+        rows.push([{ text: '🔄 刷新客户最新资料', callback_data: `c:${contactId}:${accountId}` }]);
     }
     return { inline_keyboard: rows };
 }
@@ -64,7 +65,7 @@ export async function getOrCreateTopic(
     }
 }
 
-/** 话题创建后发送联系人完整卡片（HTML） */
+/** 话题创建后发送联系人完整卡片（HTML），含中文化的自定义属性 */
 async function sendContactCard(
     conversationId: number,
     accountId: number,
@@ -73,7 +74,15 @@ async function sendContactCard(
 ) {
     if (!config.telegramForumChatId) return;
     try {
-        const text = renderContactCard(contactInfo, conversationId);
+        // 如果联系人有自定义属性，预先拉取 definitions 把英文键名翻译成中文。
+        // 缓存命中时几乎零耗时；缓存未命中且 API 失败时降级为键名渲染。
+        let definitions: CustomAttributeDefinition[] = [];
+        const hasCustomAttrs = contactInfo.customAttributes && Object.keys(contactInfo.customAttributes).length > 0;
+        if (hasCustomAttrs) {
+            definitions = await getCustomAttributeDefinitions('contact_attribute');
+        }
+
+        const text = renderContactCard(contactInfo, conversationId, definitions);
         await bot.telegram.sendMessage(config.telegramForumChatId, text, {
             message_thread_id: topicId,
             parse_mode: 'HTML',

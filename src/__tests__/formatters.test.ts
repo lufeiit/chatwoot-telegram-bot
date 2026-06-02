@@ -176,6 +176,52 @@ describe('renderContactCard', () => {
         expect(text).toContain('&lt;script&gt;x&lt;/script&gt;');
         expect(text).not.toContain('<script>');
     });
+
+    it('renders custom attributes inline with Chinese display names when definitions are provided', () => {
+        const definitions: CustomAttributeDefinition[] = [
+            { id: 1, attribute_display_name: 'Xboard 套餐', attribute_display_type: 'text', attribute_key: 'xboard_plan', attribute_model: 'contact_attribute' },
+            { id: 2, attribute_display_name: '账户余额', attribute_display_type: 'currency', attribute_key: 'xboard_balance', attribute_model: 'contact_attribute' },
+            { id: 3, attribute_display_name: '已用流量(GB)', attribute_display_type: 'number', attribute_key: 'xboard_used_gb', attribute_model: 'contact_attribute' },
+        ];
+        const text = renderContactCard({
+            name: 'shannon8804',
+            customAttributes: {
+                xboard_plan: '日本星链家宽',
+                xboard_balance: 0,
+                xboard_used_gb: 102.17,
+            },
+        }, 2294, definitions);
+        expect(text).toContain('客户自定义属性');
+        expect(text).toContain('<b>Xboard 套餐</b>：日本星链家宽');
+        expect(text).toContain('<b>账户余额</b>：¥0');
+        expect(text).toContain('<b>已用流量(GB)</b>：102.17');
+        // 不应再有旧版「📊 自定义属性 N 项（点击下方...按钮查看）」的占位提示
+        expect(text).not.toContain('自定义属性 3 项');
+        expect(text).not.toContain('按钮查看');
+    });
+
+    it('falls back to key names when definitions are unavailable', () => {
+        const text = renderContactCard({
+            name: 'A',
+            customAttributes: { unknown_key: 'value' },
+        }, 1);
+        // 没传 definitions → 降级用 <code>键名</code>: 值
+        expect(text).toContain('<code>unknown_key</code>：value');
+    });
+
+    it('skips empty custom attribute values', () => {
+        const definitions: CustomAttributeDefinition[] = [
+            { id: 1, attribute_display_name: 'Plan', attribute_display_type: 'text', attribute_key: 'plan', attribute_model: 'contact_attribute' },
+            { id: 2, attribute_display_name: 'Balance', attribute_display_type: 'number', attribute_key: 'balance', attribute_model: 'contact_attribute' },
+        ];
+        const text = renderContactCard({
+            name: 'A',
+            customAttributes: { plan: 'pro', balance: null, empty_field: '' },
+        }, 1, definitions);
+        expect(text).toContain('<b>Plan</b>：pro');
+        expect(text).not.toContain('Balance');
+        expect(text).not.toContain('empty_field');
+    });
 });
 
 describe('renderForwardedMessage', () => {
