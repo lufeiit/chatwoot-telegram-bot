@@ -5,6 +5,8 @@ import type {
     ChatwootContactDetail,
     CustomAttributeDefinition,
     CustomAttributeType,
+    ChatwootAdditionalAttributes,
+    ChatwootBrowserInfo,
 } from './types';
 
 // ============ HTML Escaping ============
@@ -97,7 +99,7 @@ export function markdownToTelegramHtml(md: string): string {
     return text;
 }
 
-// ============ Channel Name Mapping ============
+// ============ Channel / Language / Referer Labels ============
 
 const CHANNEL_LABEL: Record<string, string> = {
     'Channel::WebWidget': '🌐 网页咨询',
@@ -119,29 +121,162 @@ function channelLabel(channel?: string): string {
     return CHANNEL_LABEL[channel] || channel.replace(/^Channel::/, '');
 }
 
+/**
+ * 把 BCP47/ISO-639-1 语言码翻译成中文显示名。
+ * 与 Chatwoot UI 一致：Chatwoot 把 "zh" → "Chinese"，我们更进一步翻成中文。
+ * 未识别的代码原样返回。
+ */
+const LANG_LABEL: Record<string, string> = {
+    zh: '中文',
+    'zh-cn': '简体中文',
+    'zh-tw': '繁体中文',
+    'zh-hk': '繁体中文（香港）',
+    en: '英文',
+    'en-us': '英文（美）',
+    'en-gb': '英文（英）',
+    ja: '日文',
+    ko: '韩文',
+    ru: '俄文',
+    fr: '法文',
+    de: '德文',
+    es: '西班牙文',
+    'es-es': '西班牙文',
+    pt: '葡萄牙文',
+    'pt-br': '葡萄牙文（巴西）',
+    it: '意大利文',
+    ar: '阿拉伯文',
+    vi: '越南文',
+    th: '泰文',
+    id: '印尼文',
+    tr: '土耳其文',
+    hi: '印地文',
+    nl: '荷兰文',
+    pl: '波兰文',
+    sv: '瑞典文',
+    fi: '芬兰文',
+    da: '丹麦文',
+    no: '挪威文',
+    uk: '乌克兰文',
+    he: '希伯来文',
+    cs: '捷克文',
+    el: '希腊文',
+    ro: '罗马尼亚文',
+    hu: '匈牙利文',
+    bg: '保加利亚文',
+    fa: '波斯文',
+    bn: '孟加拉文',
+    ms: '马来文',
+    fil: '菲律宾文',
+    mn: '蒙古文',
+};
+
+export function languageLabel(code: string | undefined | null): string {
+    if (!code) return '';
+    // 归一化：转小写、把下划线变连字符（zh_CN → zh-cn）
+    const norm = String(code).trim().toLowerCase().replace(/_/g, '-');
+    if (LANG_LABEL[norm]) return LANG_LABEL[norm];
+    // 退到主语言：zh-cn → zh
+    const primary = norm.split('-')[0];
+    if (LANG_LABEL[primary]) return LANG_LABEL[primary];
+    return String(code);
+}
+
+/**
+ * 把 referer URL 渲染成可点击链接，锚文本只显示 hostname（更短更整洁）。
+ * URL 解析失败时回退到完整 URL 当锚文本。
+ * 不支持的 scheme（如 javascript:, about:blank）当成纯文本。
+ */
+export function formatReferer(url: string | undefined | null): string {
+    if (!url) return '';
+    const trimmed = String(url).trim();
+    if (!trimmed) return '';
+    // 拒绝危险 scheme（防 XSS 通过 javascript: 链接）
+    if (/^(javascript|data|file|about):/i.test(trimmed)) {
+        return escapeHtml(trimmed);
+    }
+    try {
+        const parsed = new URL(trimmed);
+        // 只允许 http/https
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            return escapeHtml(trimmed);
+        }
+        const hostname = parsed.hostname || trimmed;
+        return link(hostname, trimmed);
+    } catch {
+        // 解析失败时尝试当成相对路径，原样显示
+        return escapeHtml(trimmed);
+    }
+}
+
 // ============ Extract Contact Card from Webhook Payload ============
+
+/** 工具：从多个来源中取首个非空值。
+ *  - null/undefined 永远跳过
+ *  - 空字符串 ''/空对象 视为"无值"跳过（避免 conv 上 referer="" 把 contact 的真实 URL 挤掉）
+ *  - 0/false 保留（视为有效值，用于数字/布尔字段）
+ */
+function pickFirst<T>(...candidates: Array<T | undefined | null>): T | undefined {
+    for (const c of candidates) {
+        if (c == null) continue;
+        if (typeof c === 'string' && c.length === 0) continue;
+        if (typeof c === 'object' && !Array.isArray(c) && Object.keys(c as object).length === 0) continue;
+        return c;
+    }
+    return undefined;
+}
 
 /**
  * 从 webhook payload 中提取联系人完整信息。
- * 优先级：sender (incoming) > conversation.meta.sender；conversation.additional_attributes 兜底浏览器信息。
+ *
+ * 优先级策略（关键）：
+ * - 会话级（conversation.additional_attributes）→ 联系人级（sender 或 meta.sender 的 additional_attributes）
+ *   适用于「当前会话的实时数据」：browser、browser_language、referer、initiated_at、created_at_ip、updated_at_ip
+ * - 联系人级（contact）→ 会话级
+ *   适用于「持久属性」：country、city、country_code（一般由 IP 反查异步写入到 contact 上）
+ *
+ * 这与 Chatwoot 后台「对话信息」面板的字段来源完全一致：
+ * - 发起于/语言/启动自/浏览器/操作系统 全部读 conversation.additional_attributes
+ * - IP 读 contact.additional_attributes.created_at_ip（但若 conv 上有则优先用）
  */
 export function extractContactCard(event: ChatwootMessageEvent): ContactCardInfo {
     const conversation = event.conversation;
     const messageSender = event.sender;
     const metaSender = conversation?.meta?.sender;
 
-    // 联系人信息：incoming 时 sender 即为联系人；outgoing 时只有 meta.sender 才是联系人
+    // 联系人快照：incoming 时 sender 即为联系人；outgoing 时只有 meta.sender 才是联系人
     const isIncomingContact = event.message_type === 'incoming' && messageSender?.type !== 'user';
     const contact: ChatwootSender | undefined = isIncomingContact ? messageSender : metaSender;
 
     const name = contact?.name || metaSender?.name || '匿名联系人';
-    const additional = contact?.additional_attributes || metaSender?.additional_attributes || {};
-    const convAdditional = conversation?.additional_attributes || {};
-    // 浏览器信息：联系人级和对话级都可能有，取联系人优先，对话兜底
-    const browser = additional.browser || convAdditional.browser;
-    const browserLanguage = additional.browser_language || convAdditional.browser_language;
-    const referer = additional.referer || convAdditional.referer;
-    const initiatedAtRaw = additional.initiated_at?.timestamp ?? convAdditional.initiated_at?.timestamp;
+
+    // 持久的联系人属性（contact level，registered country/city）
+    const contactAttrs: ChatwootAdditionalAttributes =
+        contact?.additional_attributes || metaSender?.additional_attributes || {};
+
+    // 当前会话属性（conversation level，本次会话的浏览器/IP/referer 等）
+    const convAttrs: ChatwootAdditionalAttributes = conversation?.additional_attributes || {};
+
+    // 会话级优先（每字段单独 fallback，避免 contact 上有 browser、conv 上有 browser_language 时漏读）
+    const browser: ChatwootBrowserInfo | undefined =
+        pickFirst<ChatwootBrowserInfo>(convAttrs.browser, contactAttrs.browser);
+    const browserLanguage = pickFirst<string>(convAttrs.browser_language, contactAttrs.browser_language);
+    const referer = pickFirst<string>(
+        typeof convAttrs.referer === 'string' ? convAttrs.referer : undefined,
+        typeof contactAttrs.referer === 'string' ? contactAttrs.referer : undefined,
+    );
+    const initiatedAtRaw = pickFirst<unknown>(
+        convAttrs.initiated_at?.timestamp,
+        contactAttrs.initiated_at?.timestamp,
+    );
+    // IP：优先取 updated_at_ip（最近一次更新），再 created_at_ip（首次访问）；
+    // 与 Chatwoot ContactIpLookupJob 的 get_contact_ip 顺序一致。
+    const createdAtIp = pickFirst<string>(
+        typeof (convAttrs as Record<string, unknown>).updated_at_ip === 'string' ? (convAttrs as Record<string, string>).updated_at_ip : undefined,
+        typeof (contactAttrs as Record<string, unknown>).updated_at_ip === 'string' ? (contactAttrs as Record<string, string>).updated_at_ip : undefined,
+        typeof convAttrs.created_at_ip === 'string' ? convAttrs.created_at_ip : undefined,
+        typeof contactAttrs.created_at_ip === 'string' ? contactAttrs.created_at_ip : undefined,
+    );
+
     const initiatedAt = parseTimestamp(initiatedAtRaw);
 
     return {
@@ -153,16 +288,19 @@ export function extractContactCard(event: ChatwootMessageEvent): ContactCardInfo
         sourceId: conversation?.contact_inbox?.source_id,
         channel: conversation?.channel || event.inbox?.channel_type,
         inboxName: event.inbox?.name,
-        country: typeof additional.country === 'string' ? additional.country : undefined,
-        city: typeof additional.city === 'string' ? additional.city : undefined,
-        countryCode: typeof additional.country_code === 'string' ? additional.country_code : undefined,
+        // 持久属性（country / city / country_code）：固定从 contact 读
+        country: typeof contactAttrs.country === 'string' ? contactAttrs.country : undefined,
+        city: typeof contactAttrs.city === 'string' ? contactAttrs.city : undefined,
+        countryCode: typeof contactAttrs.country_code === 'string' ? contactAttrs.country_code : undefined,
+        // 会话级属性（browser 整体来自上面的 pickFirst 结果）
         browserName: browser?.browser_name,
         browserVersion: browser?.browser_version,
         platformName: browser?.platform_name,
+        platformVersion: browser?.platform_version,
         deviceName: browser?.device_name,
         browserLanguage,
-        referer: typeof referer === 'string' ? referer : undefined,
-        createdAtIp: typeof additional.created_at_ip === 'string' ? additional.created_at_ip : undefined,
+        referer,
+        createdAtIp,
         initiatedAt,
         customAttributes: contact?.custom_attributes,
         labels: conversation?.labels,
@@ -192,9 +330,25 @@ function formatTimestamp(seconds: number): string {
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** 拼浏览器字符串：name + version；只有 name 时只显示 name；都没有时返回空 */
+function joinBrowser(name?: string, version?: string): string {
+    if (!name) return '';
+    return version ? `${name} ${version}` : name;
+}
+
+/** 拼操作系统字符串：platform_name + platform_version；fallback 到 device_name */
+function joinOs(platformName?: string, platformVersion?: string, deviceName?: string): string {
+    if (platformName) {
+        return platformVersion ? `${platformName} ${platformVersion}` : platformName;
+    }
+    return deviceName || '';
+}
+
 /**
  * 渲染联系人完整卡片（HTML 格式，可直接作为 sendMessage 内容）。
- * 自动隐藏空字段。
+ *
+ * 字段顺序与 Chatwoot 后台「对话信息」面板一致：
+ *   身份（姓名/邮箱/电话/标识）→ 渠道/来源 → 持久位置 → 会话信息（发起/语言/启动自/浏览器/IP/OS）→ 标签 → 自定义属性
  *
  * @param definitions 自定义属性定义列表（含中文 display_name + 类型）。
  *                    传空数组时降级用英文键名渲染。
@@ -205,6 +359,8 @@ export function renderContactCard(
     definitions: CustomAttributeDefinition[] = [],
 ): string {
     const lines: string[] = [];
+
+    // === 身份 ===
     lines.push(`👤 <b>${escapeHtml(info.name)}</b>  <code>#${conversationId}</code>`);
     lines.push('━━━━━━━━━━━━━━━━');
 
@@ -217,39 +373,51 @@ export function renderContactCard(
         lines.push(`🔑 ${escapeHtml(info.sourceId)}`);
     }
 
-    // 来源
+    // === 渠道 ===
     const channelText = channelLabel(info.channel);
     const inboxSuffix = info.inboxName ? ` · ${escapeHtml(info.inboxName)}` : '';
     lines.push(`📥 ${channelText}${inboxSuffix}`);
 
-    // 位置
-    const locationParts = [info.country, info.city].filter(Boolean) as string[];
+    // === 持久位置（contact-level）===
+    const locationParts: string[] = [];
+    if (info.country) locationParts.push(info.country);
+    if (info.city) locationParts.push(info.city);
     if (locationParts.length > 0) {
         lines.push(`📍 ${escapeHtml(locationParts.join(' · '))}`);
+    } else if (info.countryCode) {
+        lines.push(`📍 ${escapeHtml(info.countryCode)}`);
     }
 
-    // 设备/浏览器
-    const deviceParts: string[] = [];
-    if (info.browserName) {
-        deviceParts.push(info.browserVersion ? `${info.browserName} ${info.browserVersion}` : info.browserName);
+    // === 会话信息（conversation-level，匹配 Chatwoot 对话信息面板顺序）===
+    // 单独写一个块，所有字段都有 <b>label</b>：value 前缀，整齐排版
+    if (info.initiatedAt) {
+        lines.push(`🕒 <b>发起于</b>：${formatTimestamp(info.initiatedAt)}`);
     }
-    if (info.platformName) deviceParts.push(info.platformName);
-    if (info.deviceName && info.deviceName !== info.platformName) deviceParts.push(info.deviceName);
-    if (deviceParts.length > 0) {
-        lines.push(`💻 ${escapeHtml(deviceParts.join(' · '))}`);
+    if (info.browserLanguage) {
+        const label = languageLabel(info.browserLanguage);
+        lines.push(`🗣️ <b>浏览器语言</b>：${escapeHtml(label)}`);
+    }
+    if (info.referer) {
+        lines.push(`🔗 <b>启动自</b>：${formatReferer(info.referer)}`);
+    }
+    const browserText = joinBrowser(info.browserName, info.browserVersion);
+    if (browserText) {
+        lines.push(`🌐 <b>浏览器</b>：${escapeHtml(browserText)}`);
+    }
+    if (info.createdAtIp) {
+        lines.push(`📡 <b>IP</b>：${escapeHtml(info.createdAtIp)}`);
+    }
+    const osText = joinOs(info.platformName, info.platformVersion, info.deviceName);
+    if (osText) {
+        lines.push(`💻 <b>操作系统</b>：${escapeHtml(osText)}`);
     }
 
-    if (info.browserLanguage) lines.push(`🗣️ ${escapeHtml(info.browserLanguage)}`);
-    if (info.referer) lines.push(`🔗 ${link('来源页面', info.referer)}`);
-    if (info.createdAtIp) lines.push(`🌐 IP：${escapeHtml(info.createdAtIp)}`);
-    if (info.initiatedAt) lines.push(`🕒 首次访问：${formatTimestamp(info.initiatedAt)}`);
-
+    // === 标签 ===
     if (info.labels && info.labels.length > 0) {
         lines.push(`🏷️ ${info.labels.map((l) => escapeHtml(l)).join(' · ')}`);
     }
 
-    // 自定义属性：按中文 display_name + 类型化的值直接展示在卡片里。
-    // 没有 definitions 时降级显示原始键名（按钮可用于刷新）。
+    // === 自定义属性 ===
     const custom = info.customAttributes || {};
     const customKeys = Object.keys(custom).filter((k) => {
         const v = custom[k];
@@ -325,7 +493,12 @@ export function formatCustomAttributeValue(value: unknown, type: CustomAttribute
 
 /**
  * 渲染「客户详细资料」消息：联系人完整资料 + 按中文名翻译的自定义属性。
- * 没有 definitions 时降级显示原始键名。
+ * 字段顺序与 renderContactCard 保持一致，让"刷新按钮"得到的视图与卡片完全可对比。
+ *
+ * 注意：本函数接收的是 contact API 的返回（contact 维度），不含 conversation 维度信息。
+ * 因此 browser/referer/language/initiated_at 只来自 contact.additional_attributes
+ * （可能是历史首次注册时的值，或被 IP lookup job 更新过）。
+ * 如果需要"当前会话"的浏览器信息，请看初始卡片，而非本刷新视图。
  */
 export function renderContactDetailMessage(
     contact: ChatwootContactDetail,
@@ -335,26 +508,38 @@ export function renderContactDetailMessage(
     lines.push(`👤 <b>${escapeHtml(contact.name || '匿名联系人')}</b>`);
     lines.push('━━━━━━━━━━━━━━━━');
 
-    // 基础信息
     if (contact.email) lines.push(`📧 ${escapeHtml(contact.email)}`);
     if (contact.phone_number) lines.push(`📞 ${escapeHtml(contact.phone_number)}`);
     if (contact.identifier) lines.push(`🆔 ${escapeHtml(contact.identifier)}`);
 
-    // 额外属性（country / city / browser / referer 等系统字段）
-    const a = contact.additional_attributes || {};
+    const a: ChatwootAdditionalAttributes = contact.additional_attributes || {};
+
+    // 持久位置
     const locationParts: string[] = [];
     if (typeof a.country === 'string') locationParts.push(a.country);
     if (typeof a.city === 'string') locationParts.push(a.city);
     if (locationParts.length > 0) lines.push(`📍 ${escapeHtml(locationParts.join(' · '))}`);
-    if (typeof a.created_at_ip === 'string') lines.push(`🌐 IP：${escapeHtml(a.created_at_ip)}`);
-    if (a.browser?.browser_name) {
-        const browser = a.browser.browser_version ? `${a.browser.browser_name} ${a.browser.browser_version}` : a.browser.browser_name;
-        const platform = a.browser.platform_name ? ` · ${a.browser.platform_name}` : '';
-        lines.push(`💻 ${escapeHtml(browser)}${escapeHtml(platform)}`);
-    }
-    if (typeof a.browser_language === 'string') lines.push(`🗣️ ${escapeHtml(a.browser_language)}`);
+    else if (typeof a.country_code === 'string') lines.push(`📍 ${escapeHtml(a.country_code)}`);
 
-    // 自定义属性区
+    // 会话信息
+    if (a.initiated_at?.timestamp != null) {
+        const ts = parseTimestamp(a.initiated_at.timestamp);
+        if (ts) lines.push(`🕒 <b>发起于</b>：${formatTimestamp(ts)}`);
+    }
+    if (typeof a.browser_language === 'string') {
+        lines.push(`🗣️ <b>浏览器语言</b>：${escapeHtml(languageLabel(a.browser_language))}`);
+    }
+    if (typeof a.referer === 'string' && a.referer) {
+        lines.push(`🔗 <b>启动自</b>：${formatReferer(a.referer)}`);
+    }
+    const browserStr = joinBrowser(a.browser?.browser_name, a.browser?.browser_version);
+    if (browserStr) lines.push(`🌐 <b>浏览器</b>：${escapeHtml(browserStr)}`);
+    const ip = (a as Record<string, unknown>).updated_at_ip || a.created_at_ip;
+    if (typeof ip === 'string') lines.push(`📡 <b>IP</b>：${escapeHtml(ip)}`);
+    const osStr = joinOs(a.browser?.platform_name, a.browser?.platform_version, a.browser?.device_name);
+    if (osStr) lines.push(`💻 <b>操作系统</b>：${escapeHtml(osStr)}`);
+
+    // 自定义属性
     const custom = contact.custom_attributes || {};
     const customKeys = Object.keys(custom).filter((k) => custom[k] != null && custom[k] !== '');
 
@@ -362,11 +547,6 @@ export function renderContactDetailMessage(
         lines.push('');
         lines.push('📊 <b>客户自定义属性</b>');
 
-        // 用 attribute_key → definition 建索引
-        const defByKey = new Map<string, CustomAttributeDefinition>();
-        for (const def of definitions) defByKey.set(def.attribute_key, def);
-
-        // 按 definition 顺序渲染（保证管理员配置的顺序），再追加未定义的
         const rendered = new Set<string>();
         for (const def of definitions) {
             if (!customKeys.includes(def.attribute_key)) continue;
@@ -375,7 +555,6 @@ export function renderContactDetailMessage(
             lines.push(`• <b>${escapeHtml(def.attribute_display_name)}</b>：${formatted}`);
             rendered.add(def.attribute_key);
         }
-        // 未定义的（webhook 里有但管理员没配 definition）
         for (const key of customKeys) {
             if (rendered.has(key)) continue;
             lines.push(`• <code>${escapeHtml(key)}</code>：${escapeHtml(String(custom[key]))}`);
@@ -439,4 +618,4 @@ export function extractSenderName(event: ChatwootMessageEvent): { name: string; 
 }
 
 // Internal exports used in tests
-export const __test__ = { parseTimestamp, channelLabel };
+export const __test__ = { parseTimestamp, channelLabel, joinBrowser, joinOs };

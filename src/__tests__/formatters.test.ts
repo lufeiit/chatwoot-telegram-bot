@@ -8,6 +8,8 @@ import {
     markdownToTelegramHtml,
     formatCustomAttributeValue,
     renderContactDetailMessage,
+    languageLabel,
+    formatReferer,
     __test__,
 } from '../formatters';
 import type { ChatwootMessageEvent, ChatwootContactDetail, CustomAttributeDefinition } from '../types';
@@ -153,14 +155,20 @@ describe('renderContactCard', () => {
         expect(text).toContain('<b>张三</b>');
         expect(text).toContain('#9');
         expect(text).toContain('foo@bar.com');
-        expect(text).toContain('🌐 网页咨询');
+        // 渠道 + 收件箱
+        expect(text).toContain('网页咨询');
         expect(text).toContain('官网');
+        // 持久位置
         expect(text).toContain('中国 · 上海');
-        expect(text).toContain('Chrome 138');
-        expect(text).toContain('macOS');
-        expect(text).toContain('zh-CN');
-        // URL & 被转义
+        // 会话信息块
+        expect(text).toContain('🕒 <b>发起于</b>：');
+        expect(text).toContain('🗣️ <b>浏览器语言</b>：简体中文'); // zh-CN → 简体中文
+        expect(text).toContain('🔗 <b>启动自</b>：');
+        expect(text).toContain('🌐 <b>浏览器</b>：Chrome 138');
+        expect(text).toContain('💻 <b>操作系统</b>：macOS'); // 没有 version 时只显示 name
+        // URL & 被转义；hostname 作锚文本
         expect(text).toContain('href="https://e.com/p?x=1&amp;y=2"');
+        expect(text).toContain('>e.com</a>');
     });
 
     it('skips missing fields', () => {
@@ -168,7 +176,10 @@ describe('renderContactCard', () => {
         expect(text).toContain('匿名联系人');
         expect(text).not.toContain('📧');
         expect(text).not.toContain('📞');
-        expect(text).not.toContain('💻');
+        // 没有 browser 时无浏览器行；但卡片有 💬 提示行，所以不能用 💻 来反向检测
+        expect(text).not.toContain('🌐 <b>浏览器</b>');
+        expect(text).not.toContain('💻 <b>操作系统</b>');
+        expect(text).not.toContain('🕒 <b>发起于</b>');
     });
 
     it('escapes HTML in name to prevent injection', () => {
@@ -266,6 +277,319 @@ describe('renderForwardedMessage', () => {
     });
 });
 
+describe('languageLabel', () => {
+    it('maps zh / zh-CN / zh_CN / zh-cn to Chinese variants', () => {
+        expect(languageLabel('zh')).toBe('中文');
+        expect(languageLabel('zh-CN')).toBe('简体中文');
+        expect(languageLabel('zh_CN')).toBe('简体中文'); // underscore normalize
+        expect(languageLabel('zh-TW')).toBe('繁体中文');
+    });
+    it('maps en variants', () => {
+        expect(languageLabel('en')).toBe('英文');
+        expect(languageLabel('en-US')).toBe('英文（美）');
+        expect(languageLabel('en-GB')).toBe('英文（英）');
+    });
+    it('maps other common languages', () => {
+        expect(languageLabel('ja')).toBe('日文');
+        expect(languageLabel('ko')).toBe('韩文');
+        expect(languageLabel('ru')).toBe('俄文');
+        expect(languageLabel('vi')).toBe('越南文');
+    });
+    it('falls back to primary language for unknown region', () => {
+        // fr-XX 没在字典里，但 fr 在 → 应该映射成法文
+        expect(languageLabel('fr-XX')).toBe('法文');
+    });
+    it('returns raw code for unknown language', () => {
+        expect(languageLabel('xx-YY')).toBe('xx-YY');
+        expect(languageLabel('klingon')).toBe('klingon');
+    });
+    it('returns empty for empty input', () => {
+        expect(languageLabel('')).toBe('');
+        expect(languageLabel(undefined)).toBe('');
+        expect(languageLabel(null)).toBe('');
+    });
+});
+
+describe('formatReferer', () => {
+    it('renders hostname as anchor text, full URL as href', () => {
+        expect(formatReferer('https://www.sufe.pro/#/shop'))
+            .toBe('<a href="https://www.sufe.pro/#/shop">www.sufe.pro</a>');
+    });
+    it('escapes & in URL', () => {
+        expect(formatReferer('https://e.com/?a=1&b=2'))
+            .toBe('<a href="https://e.com/?a=1&amp;b=2">e.com</a>');
+    });
+    it('rejects javascript: scheme (XSS prevention)', () => {
+        expect(formatReferer('javascript:alert(1)')).toBe('javascript:alert(1)');
+        expect(formatReferer('javascript:alert(1)')).not.toContain('<a');
+    });
+    it('rejects data: and about: schemes', () => {
+        expect(formatReferer('data:text/html,<h1>x</h1>')).not.toContain('<a');
+        expect(formatReferer('about:blank')).not.toContain('<a');
+    });
+    it('falls back to escaped raw text on parse failure', () => {
+        expect(formatReferer('not a url')).toBe('not a url');
+    });
+    it('returns empty for empty input', () => {
+        expect(formatReferer('')).toBe('');
+        expect(formatReferer(undefined)).toBe('');
+    });
+});
+
+describe('joinBrowser / joinOs', () => {
+    const { joinBrowser, joinOs } = __test__;
+
+    it('joinBrowser: name + version', () => {
+        expect(joinBrowser('Chrome', '131.0.6778.200')).toBe('Chrome 131.0.6778.200');
+    });
+    it('joinBrowser: name only when version missing', () => {
+        expect(joinBrowser('Safari', undefined)).toBe('Safari');
+    });
+    it('joinBrowser: empty when name missing', () => {
+        expect(joinBrowser(undefined, '1.0')).toBe('');
+    });
+    it('joinOs: platform name + version', () => {
+        expect(joinOs('Android', '16', 'SM-G991B')).toBe('Android 16');
+    });
+    it('joinOs: falls back to device_name when no platform_name', () => {
+        expect(joinOs(undefined, undefined, 'Pixel 7')).toBe('Pixel 7');
+    });
+    it('joinOs: empty when nothing available', () => {
+        expect(joinOs(undefined, undefined, undefined)).toBe('');
+    });
+});
+
+describe('extractContactCard — conversation-level priority', () => {
+    it('prefers conversation.additional_attributes for browser / language / referer / initiated_at / platform_version', () => {
+        const event: ChatwootMessageEvent = {
+            event: 'message_created',
+            message_type: 'incoming',
+            sender: {
+                id: 99,
+                type: 'contact',
+                name: 'A',
+                additional_attributes: {
+                    // 旧的 contact-level 数据（应被会话级覆盖）
+                    browser: { browser_name: 'OldChrome', browser_version: '50', platform_name: 'Windows', platform_version: '7' },
+                    browser_language: 'en',
+                    referer: 'https://old.example.com',
+                    initiated_at: { timestamp: 1000 },
+                    // 持久属性
+                    country: '美国',
+                    city: '旧金山',
+                    country_code: 'US',
+                    created_at_ip: '1.1.1.1',
+                },
+            },
+            conversation: {
+                id: 1,
+                additional_attributes: {
+                    // 当前会话数据（应优先）
+                    browser: { browser_name: 'Chrome', browser_version: '131.0', platform_name: 'Android', platform_version: '16' },
+                    browser_language: 'zh-CN',
+                    referer: 'https://www.sufe.pro/#/shop',
+                    initiated_at: { timestamp: 1717286400 },
+                },
+            },
+        };
+        const card = extractContactCard(event);
+        // 会话级覆盖
+        expect(card.browserName).toBe('Chrome');
+        expect(card.browserVersion).toBe('131.0');
+        expect(card.platformName).toBe('Android');
+        expect(card.platformVersion).toBe('16');
+        expect(card.browserLanguage).toBe('zh-CN');
+        expect(card.referer).toBe('https://www.sufe.pro/#/shop');
+        expect(card.initiatedAt).toBe(1717286400);
+        // 持久属性来自 contact
+        expect(card.country).toBe('美国');
+        expect(card.city).toBe('旧金山');
+        expect(card.countryCode).toBe('US');
+        expect(card.createdAtIp).toBe('1.1.1.1'); // 仅 contact 有时
+    });
+
+    it('falls back to contact-level when conversation lacks the field', () => {
+        const event: ChatwootMessageEvent = {
+            event: 'message_created',
+            message_type: 'incoming',
+            sender: {
+                id: 99,
+                type: 'contact',
+                name: 'A',
+                additional_attributes: {
+                    browser: { browser_name: 'Safari', browser_version: '17' },
+                    browser_language: 'ja',
+                    country: '日本',
+                },
+            },
+            conversation: {
+                id: 1,
+                additional_attributes: {},
+            },
+        };
+        const card = extractContactCard(event);
+        expect(card.browserName).toBe('Safari');
+        expect(card.browserVersion).toBe('17');
+        expect(card.browserLanguage).toBe('ja');
+        expect(card.country).toBe('日本');
+    });
+
+    it('country/city/country_code are NEVER taken from conversation', () => {
+        // 即使 conv.additional_attributes 上有这些（一些罕见集成），也只读 contact 的
+        const event: ChatwootMessageEvent = {
+            event: 'message_created',
+            message_type: 'incoming',
+            sender: {
+                id: 99,
+                type: 'contact',
+                name: 'A',
+                additional_attributes: { country: '中国', city: '北京' },
+            },
+            conversation: {
+                id: 1,
+                additional_attributes: { country: 'US', city: 'NYC' } as Record<string, unknown>,
+            },
+        };
+        const card = extractContactCard(event);
+        expect(card.country).toBe('中国');
+        expect(card.city).toBe('北京');
+    });
+
+    it('treats conv-level empty string as "no value" so contact-level non-empty wins', () => {
+        // pickFirst 不应让 conv 上的空 referer 把 contact 上的真实 URL 挤掉
+        const event: ChatwootMessageEvent = {
+            event: 'message_created',
+            message_type: 'incoming',
+            sender: {
+                id: 99,
+                type: 'contact',
+                name: 'A',
+                additional_attributes: {
+                    referer: 'https://valid-old.example.com',
+                    browser_language: 'fr',
+                },
+            },
+            conversation: {
+                id: 1,
+                additional_attributes: { referer: '', browser_language: '' },
+            },
+        };
+        const card = extractContactCard(event);
+        expect(card.referer).toBe('https://valid-old.example.com');
+        expect(card.browserLanguage).toBe('fr');
+    });
+
+    it('treats conv-level empty browser object as "no value"', () => {
+        const event: ChatwootMessageEvent = {
+            event: 'message_created',
+            message_type: 'incoming',
+            sender: {
+                id: 99,
+                type: 'contact',
+                name: 'A',
+                additional_attributes: {
+                    browser: { browser_name: 'Firefox', browser_version: '120' },
+                },
+            },
+            conversation: {
+                id: 1,
+                additional_attributes: { browser: {} }, // empty object should NOT mask contact
+            },
+        };
+        const card = extractContactCard(event);
+        expect(card.browserName).toBe('Firefox');
+    });
+
+    it('prefers updated_at_ip over created_at_ip when both exist', () => {
+        const event: ChatwootMessageEvent = {
+            event: 'message_created',
+            message_type: 'incoming',
+            sender: {
+                id: 99,
+                type: 'contact',
+                name: 'A',
+                additional_attributes: {
+                    created_at_ip: '1.1.1.1',
+                    updated_at_ip: '2.2.2.2',
+                } as Record<string, unknown>,
+            },
+            conversation: { id: 1 },
+        };
+        const card = extractContactCard(event);
+        expect(card.createdAtIp).toBe('2.2.2.2'); // updated_at_ip wins
+    });
+});
+
+describe('renderContactCard — conversation info layout', () => {
+    it('renders all session fields in Chatwoot panel order', () => {
+        const text = renderContactCard({
+            name: '2578910587',
+            email: '2578910587@qq.com',
+            channel: 'Channel::WebWidget',
+            inboxName: '苏菲家宽',
+            initiatedAt: 1717286400,
+            browserLanguage: 'zh',
+            referer: 'https://www.sufe.pro/#/shop',
+            browserName: 'Chrome',
+            browserVersion: '131.0.6778.200',
+            platformName: 'Android',
+            platformVersion: '16',
+            createdAtIp: '240e:476:4c9:16d0:64d3:d4ff:fed5:e259',
+        }, 2295);
+
+        // 顺序：发起于 → 浏览器语言 → 启动自 → 浏览器 → IP → 操作系统
+        const lines = text.split('\n');
+        const idx = {
+            initiated: lines.findIndex(l => l.includes('发起于')),
+            lang: lines.findIndex(l => l.includes('浏览器语言')),
+            from: lines.findIndex(l => l.includes('启动自')),
+            browser: lines.findIndex(l => l.includes('浏览器</b>')),
+            ip: lines.findIndex(l => l.includes('IP</b>')),
+            os: lines.findIndex(l => l.includes('操作系统')),
+        };
+        expect(idx.initiated).toBeGreaterThan(-1);
+        expect(idx.lang).toBeGreaterThan(idx.initiated);
+        expect(idx.from).toBeGreaterThan(idx.lang);
+        expect(idx.browser).toBeGreaterThan(idx.from);
+        expect(idx.ip).toBeGreaterThan(idx.browser);
+        expect(idx.os).toBeGreaterThan(idx.ip);
+
+        // 内容
+        expect(text).toContain('🗣️ <b>浏览器语言</b>：中文');
+        expect(text).toContain('🌐 <b>浏览器</b>：Chrome 131.0.6778.200');
+        expect(text).toContain('💻 <b>操作系统</b>：Android 16');
+        expect(text).toContain('📡 <b>IP</b>：240e:476:4c9:16d0:64d3:d4ff:fed5:e259');
+        expect(text).toContain('<a href="https://www.sufe.pro/#/shop">www.sufe.pro</a>');
+    });
+
+    it('omits each line independently when its field is missing', () => {
+        const text = renderContactCard({
+            name: 'A',
+            channel: 'Channel::Api',
+            initiatedAt: 1717286400,
+            // 故意省略 browser_language / referer / browser / ip / os
+        }, 1);
+        expect(text).toContain('🕒 <b>发起于</b>');
+        expect(text).not.toContain('🗣️');
+        expect(text).not.toContain('🔗 <b>启动自</b>');
+        expect(text).not.toContain('🌐 <b>浏览器</b>');
+        expect(text).not.toContain('📡 <b>IP</b>');
+        expect(text).not.toContain('💻 <b>操作系统</b>');
+    });
+
+    it('falls back to platform name only when version missing; uses device_name when platform missing', () => {
+        const a = renderContactCard({
+            name: 'A', channel: 'X', platformName: 'macOS',
+        }, 1);
+        expect(a).toContain('💻 <b>操作系统</b>：macOS');
+
+        const b = renderContactCard({
+            name: 'B', channel: 'X', deviceName: 'iPad',
+        }, 2);
+        expect(b).toContain('💻 <b>操作系统</b>：iPad');
+    });
+});
+
 describe('formatCustomAttributeValue', () => {
     it('returns — for empty values', () => {
         expect(formatCustomAttributeValue(null, 'text')).toBe('—');
@@ -336,7 +660,9 @@ describe('renderContactDetailMessage', () => {
         expect(text).toContain('<b>shannon804</b>');
         expect(text).toContain('📧 shannon804@gmail.com');
         expect(text).toContain('德国 · 柏林');
-        expect(text).toContain('Safari 26.5 · macOS');
+        // 详情消息按新版面，浏览器和操作系统分别两行
+        expect(text).toContain('🌐 <b>浏览器</b>：Safari 26.5');
+        expect(text).toContain('💻 <b>操作系统</b>：macOS');
         // 自定义属性用中文显示名
         expect(text).toContain('<b>Xboard 状态</b>：no_account');
         expect(text).toContain('<b>账户余额</b>：¥0');

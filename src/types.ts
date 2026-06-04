@@ -178,6 +178,8 @@ export interface ContactCardInfo {
     browserName?: string;
     browserVersion?: string;
     platformName?: string;
+    /** 操作系统版本，如 Android 后面的 "16"、Windows 后面的 "10.0" */
+    platformVersion?: string;
     deviceName?: string;
     browserLanguage?: string;
     referer?: string;
