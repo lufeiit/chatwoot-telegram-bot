@@ -10,10 +10,11 @@ import {
     toggleTypingStatus,
     getCannedResponses,
     getContact,
+    getConversation,
     getCustomAttributeDefinitions,
 } from './chatwoot';
 import { buildForumInlineKeyboard, reopenTopicForConversation } from './topics';
-import { renderContactDetailMessage } from './formatters';
+import { renderContactCard, renderContactDetailMessage, buildContactCardFromApi } from './formatters';
 
 const log = createLogger('callback');
 
@@ -125,10 +126,13 @@ addRoute('o:', async (ctx, parts) => {
     await handleStatusToggle(ctx, parts, 'open');
 });
 
-// Contact detail: fetch contact + custom attribute definitions, post a detail message.
-// format: "c:<contactId>:<accountId>"
+// Contact detail: fetch contact (+ conversation) + custom attribute definitions, post a detail message.
+// format: "c:<contactId>:<accountId>:<conversationId?>"
+//   带 conversationId 时同时拉会话，补齐 source_id / 渠道 / 浏览器 / IP / 发起时间等会话维度字段；
+//   不带（旧按钮）时降级为仅联系人维度的详情视图。
 addRoute('c:', async (ctx, parts) => {
     const contactId = parseInt(parts[1], 10);
+    const conversationId = parts[3] ? parseInt(parts[3], 10) : undefined;
     if (!contactId) {
         await ctx.answerCbQuery('参数错误');
         return;
@@ -136,13 +140,28 @@ addRoute('c:', async (ctx, parts) => {
 
     try {
         await ctx.answerCbQuery('正在获取联系人详细资料...');
-        // 并发拉取联系人 + 自定义属性定义
-        const [contact, definitions] = await Promise.all([
+        // 并发拉取联系人 + 自定义属性定义 +（若按钮带了 conversationId）当前会话
+        const [contact, definitions, conversation] = await Promise.all([
             getContact(contactId),
             getCustomAttributeDefinitions('contact_attribute'),
+            conversationId
+                ? getConversation(conversationId).catch((err) => {
+                      log.warn('Failed to fetch conversation for refresh, falling back to contact-only view', {
+                          conversationId,
+                          ...extractAxiosError(err),
+                      });
+                      return undefined;
+                  })
+                : Promise.resolve(undefined),
         ]);
 
-        const text = renderContactDetailMessage(contact, definitions);
+        // 有会话信息 → 渲染与初始卡片字段一致的完整视图（去掉「点击下方按钮」footer，刷新回复本身没有按钮）。
+        // 否则降级为仅联系人维度的详情视图。
+        const text =
+            conversation && conversationId
+                ? renderContactCard(buildContactCardFromApi(conversation, contact), conversationId, definitions, { footer: false })
+                : renderContactDetailMessage(contact, definitions);
+
         const messageThreadId = (ctx.callbackQuery.message as Message & { message_thread_id?: number })?.message_thread_id;
         await ctx.reply(text, {
             parse_mode: 'HTML',
@@ -150,7 +169,7 @@ addRoute('c:', async (ctx, parts) => {
             ...(messageThreadId ? { message_thread_id: messageThreadId } : {}),
         });
     } catch (err) {
-        log.error('Failed to fetch contact detail', { contactId, ...extractAxiosError(err) });
+        log.error('Failed to fetch contact detail', { contactId, conversationId, ...extractAxiosError(err) });
         try { await ctx.answerCbQuery('❌ 获取联系人详细资料失败'); } catch { /* already answered */ }
     }
 });

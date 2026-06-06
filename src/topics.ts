@@ -23,7 +23,9 @@ export function buildForumInlineKeyboard(conversationId: number, accountId: numb
         ],
     ];
     if (contactId) {
-        rows.push([{ text: '🔄 刷新客户最新资料', callback_data: `c:${contactId}:${accountId}` }]);
+        // 末尾带 conversationId（第 4 段），刷新时才能补拉会话维度字段
+        //（source_id / 渠道 / 浏览器 / IP / 发起时间…），与初始卡片对齐。
+        rows.push([{ text: '🔄 刷新客户最新资料', callback_data: `c:${contactId}:${accountId}:${conversationId}` }]);
     }
     return { inline_keyboard: rows };
 }

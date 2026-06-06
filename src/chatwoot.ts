@@ -5,7 +5,7 @@ import FormData from 'form-data';
 import { config } from './config';
 import { createLogger, extractAxiosError } from './logger';
 import { KeyedMutex } from './mutex';
-import type { CannedResponse, CustomAttributeDefinition, ChatwootContactDetail } from './types';
+import type { CannedResponse, CustomAttributeDefinition, ChatwootContactDetail, ChatwootConversation } from './types';
 
 const log = createLogger('chatwoot');
 
@@ -265,6 +265,22 @@ export async function getContact(contactId: number): Promise<ChatwootContactDeta
         const body = response.data as { payload?: ChatwootContactDetail };
         return body.payload ?? (response.data as ChatwootContactDetail);
     }, `getContact(${contactId})`);
+}
+
+/**
+ * 拉取单个会话完整资料（不缓存：点击「刷新最新资料」才调，要拿到最新值）。
+ * 用于补齐 contact API 拿不到的会话维度信息：
+ * source_id、渠道、浏览器/IP/referer/语言/发起时间（均在 conversation.additional_attributes）。
+ */
+export async function getConversation(conversationId: number): Promise<ChatwootConversation> {
+    return withRetry(async () => {
+        const accountId = config.chatwootAccountId;
+        const url = `/api/v1/accounts/${accountId}/conversations/${conversationId}`;
+        const response = await client.get<{ payload?: ChatwootConversation } | ChatwootConversation>(url);
+        // 兼容可能的 payload 包裹
+        const body = response.data as { payload?: ChatwootConversation };
+        return body.payload ?? (response.data as ChatwootConversation);
+    }, `getConversation(${conversationId})`);
 }
 
 // ============ Canned Responses (with short-lived cache) ============

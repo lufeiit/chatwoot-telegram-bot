@@ -3,6 +3,7 @@ import type {
     ContactCardInfo,
     ChatwootSender,
     ChatwootContactDetail,
+    ChatwootConversation,
     CustomAttributeDefinition,
     CustomAttributeType,
     ChatwootAdditionalAttributes,
@@ -307,6 +308,50 @@ export function extractContactCard(event: ChatwootMessageEvent): ContactCardInfo
     };
 }
 
+/**
+ * 「刷新最新资料」专用：把两路 API 结果（当前会话 + 联系人）合并成完整 ContactCardInfo。
+ *
+ * 为什么需要它：单点击「刷新」只调 getContact，拿到的是「联系人维度」数据，
+ * 缺少 Chatwoot「对话信息」面板里这些「会话维度」字段——
+ *   🔑 source_id、📥 渠道、🕒 发起于、🗣️ 浏览器语言、🔗 启动自、🌐 浏览器、📡 IP、💻 操作系统。
+ * 这些都只存在于 conversation（contact_inbox.source_id / channel / additional_attributes）。
+ *
+ * 实现上构造一个合成的 incoming 事件后复用 extractContactCard，
+ * 这样刷新视图与初始卡片走完全相同的字段优先级逻辑（会话级优先），二者字段一一对应。
+ * 渠道收件箱名称从 contact.contact_inboxes 按本会话 source_id 匹配补齐。
+ */
+export function buildContactCardFromApi(
+    conversation: ChatwootConversation,
+    contact: ChatwootContactDetail,
+): ContactCardInfo {
+    const sourceId = conversation.contact_inbox?.source_id;
+    const matchedInbox =
+        contact.contact_inboxes?.find((ci) => ci.source_id === sourceId)?.inbox ??
+        contact.contact_inboxes?.[0]?.inbox;
+
+    const syntheticEvent: ChatwootMessageEvent = {
+        event: 'message_created',
+        message_type: 'incoming',
+        // 用最新的 getContact 结果当 sender（邮箱/标识/自定义属性/国家城市以它为准）
+        sender: {
+            id: contact.id,
+            name: contact.name,
+            email: contact.email,
+            phone_number: contact.phone_number,
+            identifier: contact.identifier,
+            type: 'contact',
+            additional_attributes: contact.additional_attributes,
+            custom_attributes: contact.custom_attributes,
+        },
+        conversation,
+        inbox: matchedInbox
+            ? { id: matchedInbox.id, name: matchedInbox.name, channel_type: matchedInbox.channel_type }
+            : undefined,
+    };
+
+    return extractContactCard(syntheticEvent);
+}
+
 function parseTimestamp(raw: unknown): number | undefined {
     if (raw == null) return undefined;
     if (typeof raw === 'number') {
@@ -324,10 +369,19 @@ function parseTimestamp(raw: unknown): number | undefined {
 
 // ============ Render Contact Card (HTML) ============
 
+/**
+ * 把秒级时间戳偏移到北京时间（UTC+8，中国无夏令时，固定偏移即可）。
+ * 之后统一用 getUTC* 读取，读出来的就是北京时间各字段——
+ * 这样不受运行服务器本地时区影响，部署在任何机器上显示都是北京时间。
+ */
+function toBeijing(seconds: number): Date {
+    return new Date((seconds + 8 * 3600) * 1000);
+}
+
 function formatTimestamp(seconds: number): string {
-    const d = new Date(seconds * 1000);
+    const d = toBeijing(seconds);
     const pad = (n: number) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 
 /** 拼浏览器字符串：name + version；只有 name 时只显示 name；都没有时返回空 */
@@ -357,6 +411,7 @@ export function renderContactCard(
     info: ContactCardInfo,
     conversationId: number,
     definitions: CustomAttributeDefinition[] = [],
+    options: { footer?: boolean } = {},
 ): string {
     const lines: string[] = [];
 
@@ -443,8 +498,11 @@ export function renderContactCard(
         }
     }
 
-    lines.push('');
-    lines.push('💬 <i>点击下方按钮管理此对话</i>');
+    // footer 默认显示（初始卡片底部有操作按钮）；刷新视图是独立回复、无按钮，传 footer:false 关闭。
+    if (options.footer !== false) {
+        lines.push('');
+        lines.push('💬 <i>点击下方按钮管理此对话</i>');
+    }
 
     return lines.join('\n');
 }
@@ -475,9 +533,9 @@ export function formatCustomAttributeValue(value: unknown, type: CustomAttribute
         case 'date': {
             const ts = parseTimestamp(value);
             if (ts) {
-                const d = new Date(ts * 1000);
+                const d = toBeijing(ts);
                 const pad = (n: number) => String(n).padStart(2, '0');
-                return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+                return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
             }
             return escapeHtml(String(value));
         }
@@ -618,4 +676,4 @@ export function extractSenderName(event: ChatwootMessageEvent): { name: string; 
 }
 
 // Internal exports used in tests
-export const __test__ = { parseTimestamp, channelLabel, joinBrowser, joinOs };
+export const __test__ = { parseTimestamp, channelLabel, joinBrowser, joinOs, formatTimestamp };

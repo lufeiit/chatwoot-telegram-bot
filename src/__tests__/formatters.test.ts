@@ -8,11 +8,17 @@ import {
     markdownToTelegramHtml,
     formatCustomAttributeValue,
     renderContactDetailMessage,
+    buildContactCardFromApi,
     languageLabel,
     formatReferer,
     __test__,
 } from '../formatters';
-import type { ChatwootMessageEvent, ChatwootContactDetail, CustomAttributeDefinition } from '../types';
+import type {
+    ChatwootMessageEvent,
+    ChatwootContactDetail,
+    ChatwootConversation,
+    CustomAttributeDefinition,
+} from '../types';
 
 describe('escapeHtml', () => {
     it('escapes & < > but leaves quotes', () => {
@@ -697,6 +703,88 @@ describe('renderContactDetailMessage', () => {
         expect(text).toContain('Xboard 状态');
         expect(text).not.toContain('账户余额');
         expect(text).not.toContain('已用流量');
+    });
+});
+
+describe('formatTimestamp — 固定北京时间(UTC+8)', () => {
+    const fmt = __test__.formatTimestamp;
+    it('把 UTC 时间戳按 +8 小时渲染成北京时间', () => {
+        // 2024-06-02 00:00:00 UTC → 北京 08:00
+        expect(fmt(Date.UTC(2024, 5, 2, 0, 0, 0) / 1000)).toBe('2024-06-02 08:00');
+    });
+    it('跨日：UTC 当天 20:00 → 北京次日 04:00', () => {
+        expect(fmt(Date.UTC(2026, 5, 5, 20, 0, 0) / 1000)).toBe('2026-06-06 04:00');
+    });
+});
+
+describe('buildContactCardFromApi — 刷新视图补齐会话维度字段', () => {
+    // 模拟「刷新最新资料」时两路 API 的返回（用户实际场景的数据）
+    const conversation: ChatwootConversation = {
+        id: 12345,
+        channel: 'Channel::WebWidget',
+        contact_inbox: { source_id: 'cbac2a42-a3bc-418e-ac60-e1b2eb95a0d6' },
+        additional_attributes: {
+            browser: {
+                browser_name: 'Chrome',
+                browser_version: '148.0.0.0',
+                platform_name: 'Windows',
+                platform_version: '10.0',
+            },
+            browser_language: 'zh',
+            referer: 'https://www.sufe.pro',
+            created_at_ip: '43.212.202.45',
+            initiated_at: { timestamp: '2026-06-06T02:52:00Z' },
+        },
+        labels: [],
+    };
+    const contact: ChatwootContactDetail = {
+        id: 9,
+        name: '苏菲',
+        email: '752073964@qq.com',
+        // contact 自身不带会话维度信息，靠 conversation 补齐
+        additional_attributes: {},
+        custom_attributes: {},
+        contact_inboxes: [
+            {
+                source_id: 'cbac2a42-a3bc-418e-ac60-e1b2eb95a0d6',
+                inbox: { id: 3, name: '苏菲家宽', channel_type: 'Channel::WebWidget' },
+            },
+        ],
+    };
+
+    it('合并会话 + 联系人，渲染出全部 9 项字段', () => {
+        const info = buildContactCardFromApi(conversation, contact);
+        const text = renderContactCard(info, conversation.id, [], { footer: false });
+
+        expect(text).toContain('📧 752073964@qq.com');
+        expect(text).toContain('🔑 cbac2a42-a3bc-418e-ac60-e1b2eb95a0d6');
+        expect(text).toContain('📥 🌐 网页咨询 · 苏菲家宽');
+        // 发起时间固定按北京时间（UTC+8）显示：02:52 UTC → 10:52 北京，结果与服务器时区无关
+        expect(text).toContain('🕒 <b>发起于</b>：2026-06-06 10:52');
+        expect(text).toContain('🗣️ <b>浏览器语言</b>：中文');
+        expect(text).toContain('🔗 <b>启动自</b>：<a href="https://www.sufe.pro">www.sufe.pro</a>');
+        expect(text).toContain('🌐 <b>浏览器</b>：Chrome 148.0.0.0');
+        expect(text).toContain('📡 <b>IP</b>：43.212.202.45');
+        expect(text).toContain('💻 <b>操作系统</b>：Windows 10.0');
+        // 刷新视图无按钮，不应带「点击下方按钮」footer
+        expect(text).not.toContain('点击下方按钮');
+    });
+
+    it('渠道从匹配的收件箱回退取 channel_type（conversation.channel 缺失时仍正确）', () => {
+        const convNoChannel: ChatwootConversation = { ...conversation, channel: undefined };
+        const info = buildContactCardFromApi(convNoChannel, contact);
+        expect(info.channel).toBe('Channel::WebWidget');
+        expect(info.inboxName).toBe('苏菲家宽');
+    });
+
+    it('联系人级属性（邮箱/自定义属性）以最新 getContact 为准', () => {
+        const contactWithCustom: ChatwootContactDetail = {
+            ...contact,
+            custom_attributes: { xboard_balance: 42 },
+        };
+        const info = buildContactCardFromApi(conversation, contactWithCustom);
+        expect(info.email).toBe('752073964@qq.com');
+        expect(info.customAttributes).toEqual({ xboard_balance: 42 });
     });
 });
 
