@@ -99,8 +99,8 @@ CHATWOOT_ACCOUNT_ID=1
 # 可选：Webhook 签名验证密钥（在 Chatwoot Webhook 设置中生成后填入）
 # CHATWOOT_WEBHOOK_SECRET=your_webhook_secret
 
-# 可选：每条回复可配置多个关键词；\n 表示换行；忽略大小写、包含匹配
-# KEYWORD_AUTO_REPLIES=[{"keywords":["价格","费用","多少钱"],"reply":"您好！\n价格详情请查看：https://example.com/pricing\n如有疑问，请回复“人工客服”。"}]
+# 可选：同组关键词用 | 分隔，\n 表示换行；可配置多组，按书写顺序命中第一组
+# KEYWORD_AUTO_REPLIES='{"在么|在吗|你好|您好|有人":"您好，请描述具体问题并附上截图。\n\n人工客服时间：北京时间 8:00-21:00。","价格|费用|多少钱":"价格详情请查看：https://example.com/pricing"}'
 
 # 日志级别（debug / info / warn / error）
 LOG_LEVEL=info
@@ -127,7 +127,7 @@ LOG_LEVEL=info
 | `CHATWOOT_ACCESS_TOKEN` | ✅ | — | Personal Access Token |
 | `CHATWOOT_ACCOUNT_ID` | ✅ | — | 账户 ID |
 | `CHATWOOT_WEBHOOK_SECRET` | ⭕ | — | Webhook 签名密钥（强烈推荐设置） |
-| `KEYWORD_AUTO_REPLIES` | ⭕ | — | JSON 数组；每条回复支持多个关键词及 `\n` 换行 |
+| `KEYWORD_AUTO_REPLIES` | ⭕ | — | JSON 对象；同组关键词用 `|` 分隔，回复支持 `\n` 换行 |
 | `PORT` | ⭕ | `3000` | Webhook 监听端口 |
 | `LOG_LEVEL` | ⭕ | `info` | `debug` / `info` / `warn` / `error` |
 | `LOG_TO_FILE` | ⭕ | `false` | 是否写入日志文件 |

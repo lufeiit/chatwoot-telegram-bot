@@ -97,14 +97,19 @@ export function isSelfSentMessage(chatwootMessageId: number | undefined): boolea
  * 注意：mutex 只包提交动作本身（保证同会话写入顺序），不包 withRetry 重试。
  * 这样 5xx 重试期间不会阻塞同会话的后续读写。
  */
-async function postMessage(conversationId: number, body: Record<string, unknown>, label: string) {
+async function postMessage(
+    conversationId: number,
+    body: Record<string, unknown>,
+    label: string,
+    trackForDedup = true,
+) {
     const accountId = config.chatwootAccountId;
     const url = `/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
     const data = await withRetry(async () => {
         const response = await client.post(url, body);
         return response.data;
     }, label);
-    if (data?.id) trackSentMessage(data.id);
+    if (trackForDedup && data?.id) trackSentMessage(data.id);
     return data;
 }
 
@@ -138,6 +143,8 @@ export async function createMessageWithinConversationLock(conversationId: number
         conversationId,
         { content, message_type: 'outgoing', private: false },
         `createMessageWithinConversationLock(conv=${conversationId})`,
+        // 自动回复需要通过 outgoing webhook 转发到 Telegram，因此不作为回显消息过滤。
+        false,
     );
 
     log.info('Message created in Chatwoot', { conversationId, chatwootMessageId: result?.id });

@@ -3,6 +3,13 @@ export interface KeywordAutoReply {
     reply: string;
 }
 
+function splitKeywords(values: string[]): string[] {
+    return values
+        .flatMap(value => value.split('|'))
+        .map(keyword => keyword.trim())
+        .filter(Boolean);
+}
+
 export function parseKeywordAutoReplies(value: string | undefined): KeywordAutoReply[] {
     if (!value?.trim()) return [];
 
@@ -12,7 +19,7 @@ export function parseKeywordAutoReplies(value: string | undefined): KeywordAutoR
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         return Object.entries(parsed)
             .map(([keyword, reply]) => ({
-                keywords: [keyword.trim()].filter(Boolean),
+                keywords: splitKeywords([keyword]),
                 reply: typeof reply === 'string' ? reply.trim() : '',
             }))
             .filter(({ keywords, reply }) => keywords.length > 0 && reply.length > 0);
@@ -27,10 +34,7 @@ export function parseKeywordAutoReplies(value: string | undefined): KeywordAutoR
             if (!item || typeof item !== 'object') return { keywords: [], reply: '' };
             const rule = item as { keywords?: unknown; reply?: unknown };
             const keywords = Array.isArray(rule.keywords)
-                ? rule.keywords
-                    .filter((keyword): keyword is string => typeof keyword === 'string')
-                    .map(keyword => keyword.trim())
-                    .filter(Boolean)
+                ? splitKeywords(rule.keywords.filter((keyword): keyword is string => typeof keyword === 'string'))
                 : [];
             return {
                 keywords,
