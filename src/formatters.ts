@@ -478,7 +478,11 @@ export function renderContactCard(
         const v = custom[k];
         return v != null && v !== '';
     });
-    if (customKeys.length > 0) {
+    const definedKeys = new Set(definitions.map((def) => def.attribute_key));
+    const visibleKeys = definitions.length > 0
+        ? customKeys.filter((key) => definedKeys.has(key))
+        : customKeys;
+    if (visibleKeys.length > 0) {
         lines.push('');
         lines.push('📊 <b>客户自定义属性</b>');
 
@@ -491,10 +495,13 @@ export function renderContactCard(
             lines.push(`• <b>${escapeHtml(def.attribute_display_name)}</b>：${formatted}`);
             rendered.add(def.attribute_key);
         }
-        // 未配定义的属性降级显示键名（不丢数据）
-        for (const key of customKeys) {
-            if (rendered.has(key)) continue;
-            lines.push(`• <code>${escapeHtml(key)}</code>：${escapeHtml(String(custom[key]))}`);
+        // 仅在无法取得 Chatwoot 定义时降级显示原始键名。
+        // 已取得定义时忽略未知键，避免已删除或畸形的历史属性继续出现在通知中。
+        if (definitions.length === 0) {
+            for (const key of customKeys) {
+                if (rendered.has(key)) continue;
+                lines.push(`• <code>${escapeHtml(key)}</code>：${escapeHtml(String(custom[key]))}`);
+            }
         }
     }
 
@@ -600,8 +607,12 @@ export function renderContactDetailMessage(
     // 自定义属性
     const custom = contact.custom_attributes || {};
     const customKeys = Object.keys(custom).filter((k) => custom[k] != null && custom[k] !== '');
+    const definedKeys = new Set(definitions.map((def) => def.attribute_key));
+    const visibleKeys = definitions.length > 0
+        ? customKeys.filter((key) => definedKeys.has(key))
+        : customKeys;
 
-    if (customKeys.length > 0) {
+    if (visibleKeys.length > 0) {
         lines.push('');
         lines.push('📊 <b>客户自定义属性</b>');
 
@@ -613,9 +624,11 @@ export function renderContactDetailMessage(
             lines.push(`• <b>${escapeHtml(def.attribute_display_name)}</b>：${formatted}`);
             rendered.add(def.attribute_key);
         }
-        for (const key of customKeys) {
-            if (rendered.has(key)) continue;
-            lines.push(`• <code>${escapeHtml(key)}</code>：${escapeHtml(String(custom[key]))}`);
+        if (definitions.length === 0) {
+            for (const key of customKeys) {
+                if (rendered.has(key)) continue;
+                lines.push(`• <code>${escapeHtml(key)}</code>：${escapeHtml(String(custom[key]))}`);
+            }
         }
     }
 

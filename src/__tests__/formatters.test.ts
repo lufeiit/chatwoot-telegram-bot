@@ -226,6 +226,39 @@ describe('renderContactCard', () => {
         expect(text).toContain('<code>unknown_key</code>：value');
     });
 
+    it('hides stale attributes that are missing from Chatwoot definitions', () => {
+        const definitions: CustomAttributeDefinition[] = [
+            { id: 1, attribute_display_name: '已使用流量', attribute_display_type: 'text', attribute_key: 'used_traffic', attribute_model: 'contact_attribute' },
+        ];
+        const text = renderContactCard({
+            name: 'A',
+            customAttributes: {
+                used_traffic: '0.00 GB',
+                'used_trahttps://github.com/Shannon-x/chatwoot-telegram-botffic': '0.00 GB',
+            },
+        }, 1, definitions);
+
+        expect(text).toContain('<b>已使用流量</b>：0.00 GB');
+        expect(text).not.toContain('Shannon-x');
+    });
+
+    it('keeps optional upload and download attributes when definitions exist', () => {
+        const definitions: CustomAttributeDefinition[] = [
+            { id: 1, attribute_display_name: '上传流量', attribute_display_type: 'text', attribute_key: 'v2board_upload', attribute_model: 'contact_attribute' },
+            { id: 2, attribute_display_name: '下载流量', attribute_display_type: 'text', attribute_key: 'v2board_download', attribute_model: 'contact_attribute' },
+        ];
+        const text = renderContactCard({
+            name: 'A',
+            customAttributes: {
+                v2board_upload: '1.00 GB',
+                v2board_download: '2.00 GB',
+            },
+        }, 1, definitions);
+
+        expect(text).toContain('<b>上传流量</b>：1.00 GB');
+        expect(text).toContain('<b>下载流量</b>：2.00 GB');
+    });
+
     it('skips empty custom attribute values', () => {
         const definitions: CustomAttributeDefinition[] = [
             { id: 1, attribute_display_name: 'Plan', attribute_display_type: 'text', attribute_key: 'plan', attribute_model: 'contact_attribute' },
@@ -677,14 +710,15 @@ describe('renderContactDetailMessage', () => {
         expect(text).toMatch(/<b>Xboard 同步时间<\/b>：\d{4}-\d{2}-\d{2}/);
     });
 
-    it('falls back to raw key when no definition matches', () => {
+    it('hides stale raw keys when definitions are available', () => {
         const contact: ChatwootContactDetail = {
             id: 1,
             name: 'A',
             custom_attributes: { unknown_field: 'value' },
         };
         const text = renderContactDetailMessage(contact, definitions);
-        expect(text).toContain('<code>unknown_field</code>：value');
+        expect(text).not.toContain('unknown_field');
+        expect(text).not.toContain('客户自定义属性');
     });
 
     it('skips empty custom attribute section when nothing to show', () => {
