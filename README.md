@@ -2,9 +2,9 @@
 
 <div align="center">
 
-[![GitHub Container Registry](https://img.shields.io/badge/ghcr.io-shannon--x%2Fchatwoot--telegram--bot-blue?logo=github)](https://github.com/Shannon-x/chatwoot-telegram-bot/pkgs/container/chatwoot-telegram-bot)
-[![GitHub Actions](https://img.shields.io/github/actions/workflow/status/Shannon-x/chatwoot-telegram-bot/docker-build.yml?branch=main&label=Docker%20Build)](https://github.com/Shannon-x/chatwoot-telegram-bot/actions)
-[![License](https://img.shields.io/github/license/Shannon-x/chatwoot-telegram-bot)](./LICENSE)
+[![GitHub Container Registry](https://img.shields.io/badge/ghcr.io-lufeiit%2Fchatwoot--telegram--bot-blue?logo=github)](https://github.com/lufeiit/chatwoot-telegram-bot/pkgs/container/chatwoot-telegram-bot)
+[![GitHub Actions](https://img.shields.io/github/actions/workflow/status/lufeiit/chatwoot-telegram-bot/docker-build.yml?branch=main&label=Docker%20Build)](https://github.com/lufeiit/chatwoot-telegram-bot/actions)
+[![License](https://img.shields.io/github/license/lufeiit/chatwoot-telegram-bot)](./LICENSE)
 
 一个轻量级、功能强大的 Chatwoot 和 Telegram 双向消息桥接服务。
 
@@ -150,7 +150,7 @@ nano docker-compose.yml
 ```yaml
 services:
   bot:
-    image: ghcr.io/shannon-x/chatwoot-telegram-bot:latest
+    image: ghcr.io/lufeiit/chatwoot-telegram-bot:latest
     container_name: telegram-chatwoot-bot
     restart: unless-stopped
     ports:
@@ -253,5 +253,7 @@ server {
 ## 🤝 贡献与支持
 
 欢迎提交 Issue 和 Pull Request！如果这个项目对您有帮助，请给个 ⭐ Star！
+
+当前仓库：[lufeiit/chatwoot-telegram-bot](https://github.com/lufeiit/chatwoot-telegram-bot)
 
 MIT License © 2025 [Shannon-x](https://github.com/Shannon-x)
