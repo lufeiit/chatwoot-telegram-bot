@@ -2,12 +2,12 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: shannon-x/chatwoot-telegram-bot
+  IMAGE_NAME: lufeiit/chatwoot-telegram-bot
 
 jobs:
   build:

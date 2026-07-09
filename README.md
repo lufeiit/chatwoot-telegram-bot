@@ -24,6 +24,7 @@
 - 💬 **Forum Topics 会话隔离**：每个客户对话自动在 Telegram 群组中创建独立话题（Topic），彻底解决多用户同时对话时的消息混乱问题。对话结束自动关闭话题。
 - 📎 **全媒体格式支持**：支持双向发送图片、文档、视频、音频、语音、视频笔记（圆形视频）、贴纸和 GIF 动画。
 - 📋 **预设回复 (Canned Responses)**：在 Telegram 中输入 `/canned` 命令，直接调用 Chatwoot 后台配置的快捷回复，支持翻页和搜索。
+- 🤖 **关键词自动回复**：客户消息包含指定关键词时自动回复，可通过环境变量按需启用。
 - 🛡️ **安全与稳定性增强**：
   - **Webhook 签名验证**：确保消息来源绝对安全。
   - **消息去重机制**：防止网络波动导致的消息重复发送。
@@ -98,6 +99,9 @@ CHATWOOT_ACCOUNT_ID=1
 # 可选：Webhook 签名验证密钥（在 Chatwoot Webhook 设置中生成后填入）
 # CHATWOOT_WEBHOOK_SECRET=your_webhook_secret
 
+# 可选：每条回复可配置多个关键词；\n 表示换行；忽略大小写、包含匹配
+# KEYWORD_AUTO_REPLIES=[{"keywords":["价格","费用","多少钱"],"reply":"您好！\n价格详情请查看：https://example.com/pricing\n如有疑问，请回复“人工客服”。"}]
+
 # 日志级别（debug / info / warn / error）
 LOG_LEVEL=info
 
@@ -123,6 +127,7 @@ LOG_LEVEL=info
 | `CHATWOOT_ACCESS_TOKEN` | ✅ | — | Personal Access Token |
 | `CHATWOOT_ACCOUNT_ID` | ✅ | — | 账户 ID |
 | `CHATWOOT_WEBHOOK_SECRET` | ⭕ | — | Webhook 签名密钥（强烈推荐设置） |
+| `KEYWORD_AUTO_REPLIES` | ⭕ | — | JSON 数组；每条回复支持多个关键词及 `\n` 换行 |
 | `PORT` | ⭕ | `3000` | Webhook 监听端口 |
 | `LOG_LEVEL` | ⭕ | `info` | `debug` / `info` / `warn` / `error` |
 | `LOG_TO_FILE` | ⭕ | `false` | 是否写入日志文件 |

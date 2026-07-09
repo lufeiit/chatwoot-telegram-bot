@@ -1,9 +1,19 @@
 import dotenv from 'dotenv';
 import { createLogger } from './logger';
+import { parseKeywordAutoReplies } from './keyword-auto-reply';
 
 dotenv.config();
 
 const log = createLogger('config');
+
+function loadKeywordAutoReplies() {
+    try {
+        return parseKeywordAutoReplies(process.env.KEYWORD_AUTO_REPLIES);
+    } catch (error) {
+        log.error('Invalid KEYWORD_AUTO_REPLIES configuration', { error: String(error) });
+        process.exit(1);
+    }
+}
 
 /** 解析布尔型环境变量，未设置或非真值返回 false */
 function envBool(name: string, defaultValue = false): boolean {
@@ -23,6 +33,7 @@ export const config = {
     chatwootBaseUrl: (process.env.CHATWOOT_BASE_URL || 'https://app.chatwoot.com').replace(/\/+$/, ''),
     chatwootAccountId: process.env.CHATWOOT_ACCOUNT_ID || '',
     chatwootWebhookSecret: process.env.CHATWOOT_WEBHOOK_SECRET || '',
+    keywordAutoReplies: loadKeywordAutoReplies(),
     dbPath: process.env.DB_PATH || 'mappings.db',
 };
 

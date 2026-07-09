@@ -4,8 +4,9 @@ import type { Request, Response, NextFunction } from 'express';
 import { config } from './config';
 import { bot } from './bot-instance';
 import { saveMapping } from './database';
-import { isSelfSentMessage, conversationMutex } from './chatwoot';
-import { createLogger } from './logger';
+import { createMessageWithinConversationLock, isSelfSentMessage, conversationMutex } from './chatwoot';
+import { createLogger, extractAxiosError } from './logger';
+import { findKeywordAutoReply } from './keyword-auto-reply';
 import { renderForwardedMessage, extractContactCard, extractSenderName } from './formatters';
 import { extractAttachments, sendAttachmentsSequentially } from './attachments';
 import {
@@ -151,6 +152,27 @@ async function handleMessageCreated(event: ChatwootMessageEvent) {
     if (!conversationId || !accountId) {
         log.warn('Webhook event missing conversation or account ID', { conversationId, accountId, eventId: event?.id });
         return;
+    }
+
+    if (messageType === 'incoming' && event.content && config.keywordAutoReplies.length > 0) {
+        const matchedReply = findKeywordAutoReply(event.content, config.keywordAutoReplies);
+        if (matchedReply) {
+            try {
+                await createMessageWithinConversationLock(conversationId, matchedReply.reply);
+                log.info('Keyword auto reply sent', {
+                    conversationId,
+                    keywords: matchedReply.keywords,
+                    chatwootMessageId: event?.id,
+                });
+            } catch (error) {
+                // 自动回复失败不能影响原有的 Telegram 消息转发。
+                log.error('Failed to send keyword auto reply', {
+                    conversationId,
+                    keywords: matchedReply.keywords,
+                    ...extractAxiosError(error),
+                });
+            }
+        }
     }
 
     const attachments = extractAttachments(event);

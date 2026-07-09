@@ -124,6 +124,26 @@ export async function createMessage(conversationId: number, content: string) {
     return result;
 }
 
+/**
+ * 在调用方已持有 conversationMutex 时发送消息，避免重复加锁。
+ * 仅供同一会话的 webhook 串行处理链路使用。
+ */
+export async function createMessageWithinConversationLock(conversationId: number, content: string) {
+    log.debug('Creating message in Chatwoot within conversation lock', {
+        conversationId,
+        contentPreview: content.substring(0, 100) + (content.length > 100 ? '...' : ''),
+    });
+
+    const result = await postMessage(
+        conversationId,
+        { content, message_type: 'outgoing', private: false },
+        `createMessageWithinConversationLock(conv=${conversationId})`,
+    );
+
+    log.info('Message created in Chatwoot', { conversationId, chatwootMessageId: result?.id });
+    return result;
+}
+
 export async function createPrivateNote(conversationId: number, content: string) {
     log.debug('Creating private note in Chatwoot', { conversationId });
 
