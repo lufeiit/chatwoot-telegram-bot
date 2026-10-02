@@ -43,6 +43,27 @@ function envInt(name: string, defaultValue: number): number {
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : defaultValue;
 }
 
+/** 解析浮点型环境变量（如置信度阈值），未设置/非法时返回默认值 */
+function envFloat(name: string, defaultValue: number): number {
+    const raw = process.env[name];
+    if (raw == null || raw.trim() === '') return defaultValue;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : defaultValue;
+}
+
+/** 解析「收件箱ID:品牌」映射，如 "1:lufei,2:straycloud" */
+function parseBrandMap(raw: string): Record<string, string> {
+    const map: Record<string, string> = {};
+    for (const pair of raw.split(',')) {
+        const idx = pair.indexOf(':');
+        if (idx <= 0) continue;
+        const key = pair.slice(0, idx).trim();
+        const value = pair.slice(idx + 1).trim();
+        if (key && value) map[key] = value;
+    }
+    return map;
+}
+
 /**
  * 消息同步模式：
  *   webhook（默认）—— 仅接收 Chatwoot Webhook（需在 Chatwoot 后台配置）
@@ -75,6 +96,21 @@ export const config = {
     pollMaxConversations: envInt('POLL_MAX_CONVERSATIONS', 20),
     /** 首次遇到某会话时是否转发历史消息（默认 false，只记断点避免刷屏） */
     pollForwardHistory: envBool('POLL_FORWARD_HISTORY', false),
+    // ── 本地知识库（rag-api）─────────────────────────────────
+    /** 关键词规则未命中时，是否询问本地知识库自动作答 */
+    ragEnabled: envBool('RAG_ENABLED', false),
+    /** rag-api 地址，如 http://156.238.238.119:8765 */
+    ragEndpoint: process.env.RAG_ENDPOINT || '',
+    /** 与 rag-api 共享的令牌（放在 .env，不入库） */
+    ragToken: process.env.RAG_TOKEN || '',
+    /** 自动回复的最低置信度（低于此值只写私有备注给客服参考） */
+    ragMinConfidence: envFloat('RAG_MIN_CONFIDENCE', 0.65),
+    /** 写私有备注的最低置信度（低于此值连备注也不写，避免噪声） */
+    ragNoteMinConfidence: envFloat('RAG_NOTE_MIN_CONFIDENCE', 0.5),
+    /** 调用知识库的超时（毫秒）；本地 CPU 生成较慢，务必留足 */
+    ragTimeoutMs: envInt('RAG_TIMEOUT_MS', 180_000),
+    /** 收件箱 → 品牌 映射（用于知识库按品牌隔离），如 1:lufei,2:straycloud */
+    ragInboxBrand: parseBrandMap(process.env.RAG_INBOX_BRAND || '1:lufei,2:straycloud'),
     /** 关键词自动回复规则（默认通用；条目可带 inbox 限定收件箱） */
     autoReplies,
     /** @deprecated 兼容旧字段，与 autoReplies 相同 */

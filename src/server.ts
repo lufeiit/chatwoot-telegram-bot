@@ -4,9 +4,10 @@ import type { Request, Response, NextFunction } from 'express';
 import { config } from './config';
 import { bot } from './bot-instance';
 import { saveMapping } from './database';
-import { createMessageWithinConversationLock, isSelfSentMessage, conversationMutex } from './chatwoot';
+import { createMessageWithinConversationLock, createPrivateNote, isSelfSentMessage, conversationMutex } from './chatwoot';
 import { createLogger, extractAxiosError } from './logger';
 import { findKeywordAutoReplyForInbox } from './keyword-auto-reply';
+import { askKnowledgeBase } from './knowledge';
 import { renderForwardedMessage, extractContactCard, extractSenderName } from './formatters';
 import { extractAttachments, sendAttachmentsSequentially } from './attachments';
 import {
@@ -135,6 +136,58 @@ export function isDuplicateEvent(eventType: string, eventId: number | string | u
     return dedup.isDuplicate(`${eventType}:${eventId}`);
 }
 
+// ============ 本地知识库兜底 ============
+
+/**
+ * 关键词规则未命中时询问本地知识库：
+ *  · 置信度达标且通过服务端事实校验 → 自动回复客户
+ *  · 否则不回复客户，只在会话内写一条私有备注供客服参考
+ * 任何异常只记日志，不影响其他流程（降级安全）。
+ */
+async function handleKnowledgeFallback(params: {
+    conversationId: number;
+    inboxId?: number;
+    question: string;
+    eventId?: number;
+}): Promise<void> {
+    const { conversationId, inboxId, question, eventId } = params;
+    try {
+        const result = await askKnowledgeBase({ question, inboxId });
+        if (!result) return; // 未启用 / 调用失败：什么都不做
+
+        if (!result.needsHuman && result.answer && result.confidence >= config.ragMinConfidence) {
+            await createMessageWithinConversationLock(conversationId, result.answer);
+            log.info('知识库自动回复已发送', {
+                conversationId,
+                inboxId,
+                mode: result.mode,
+                confidence: Number(result.confidence.toFixed(3)),
+                chatwootMessageId: eventId,
+            });
+            return;
+        }
+
+        // 低置信度 / 被事实校验拦下：只写私有备注给客服参考，不打扰客户
+        if (result.suggestion && result.confidence >= config.ragNoteMinConfidence) {
+            const note = [
+                '【AI 建议答复 · 未自动发送】',
+                `置信度 ${result.confidence.toFixed(2)}｜出处：${result.suggestionSrc || '未知'}`
+                + (result.reason ? `｜拦截原因：${result.reason}` : ''),
+                '',
+                result.suggestion,
+            ].join('\n');
+            await createPrivateNote(conversationId, note);
+            log.info('已写入知识库建议备注', {
+                conversationId,
+                confidence: Number(result.confidence.toFixed(3)),
+                reason: result.reason,
+            });
+        }
+    } catch (error) {
+        log.error('知识库兜底流程异常（已忽略）', { conversationId, ...extractAxiosError(error) });
+    }
+}
+
 // ============ Message Handling ============
 
 /**
@@ -167,9 +220,11 @@ export async function handleMessageCreated(event: ChatwootMessageEvent) {
         return;
     }
 
-    if (messageType === 'incoming' && event.content && config.autoReplies.length > 0) {
+    if (messageType === 'incoming' && event.content) {
         const inboxId = event?.conversation?.inbox_id ?? event?.inbox?.id;
-        const matchedReply = findKeywordAutoReplyForInbox(event.content, config.autoReplies, inboxId);
+        const matchedReply = config.autoReplies.length > 0
+            ? findKeywordAutoReplyForInbox(event.content, config.autoReplies, inboxId)
+            : undefined;
         if (matchedReply) {
             try {
                 await createMessageWithinConversationLock(conversationId, matchedReply.reply);
@@ -188,6 +243,14 @@ export async function handleMessageCreated(event: ChatwootMessageEvent) {
                     ...extractAxiosError(error),
                 });
             }
+        } else if (config.ragEnabled) {
+            // 关键词未命中 → 问本地知识库。后台执行，不阻塞 Telegram 转发与后续逻辑。
+            void handleKnowledgeFallback({
+                conversationId,
+                inboxId,
+                question: event.content,
+                eventId: event?.id,
+            });
         }
     }
 
