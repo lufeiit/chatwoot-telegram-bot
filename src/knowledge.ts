@@ -10,12 +10,26 @@ export interface KnowledgeAnswer {
     answer: string;
     confidence: number;
     needsHuman: boolean;
-    mode?: 'verbatim' | 'generated';
+    /** clarify = 问题太笼统，服务端已生成反问（可直接外发） */
+    mode?: 'verbatim' | 'generated' | 'clarify';
     reason?: string;
+    /** 服务端识别出的客户平台（ios/android/windows/macos/linux） */
+    platform?: string;
     /** Top-1 命中的原文（供客服参考，不自动外发） */
     suggestion?: string;
     suggestionSrc?: string;
     latencyMs?: number;
+}
+
+/**
+ * 是否自动外发这条知识库回复。
+ *   · mode=clarify（问题太笼统，反问客户端/截图）→ 直接外发，不受置信度阈值限制；
+ *   · 其余：需通过事实校验（needsHuman=false）且置信度达标。
+ */
+export function shouldAutoReply(result: KnowledgeAnswer, minConfidence: number): boolean {
+    if (!result.answer) return false;
+    if (result.mode === 'clarify') return true;
+    return !result.needsHuman && result.confidence >= minConfidence;
 }
 
 /**
@@ -25,6 +39,9 @@ export interface KnowledgeAnswer {
 export async function askKnowledgeBase(params: {
     question: string;
     inboxId?: number;
+    /** 客户平台（会话属性 browser.platform_name，如 "iOS (iPhone)"）：
+     *  服务端据此过滤掉其他平台的专属教程，并拦截平台错配的答案。 */
+    platform?: string;
 }): Promise<KnowledgeAnswer | null> {
     if (!config.ragEnabled) return null;
     if (!config.ragEndpoint) {
@@ -39,7 +56,7 @@ export async function askKnowledgeBase(params: {
     try {
         const { data } = await axios.post(
             url,
-            { question: params.question, inbox_id: params.inboxId, brand },
+            { question: params.question, inbox_id: params.inboxId, brand, platform: params.platform },
             {
                 timeout: config.ragTimeoutMs,
                 headers: {
@@ -55,6 +72,7 @@ export async function askKnowledgeBase(params: {
             needsHuman: Boolean(data?.needs_human),
             mode: data?.mode,
             reason: data?.reason,
+            platform: typeof data?.platform === 'string' ? data.platform : undefined,
             suggestion: typeof data?.suggestion === 'string' ? data.suggestion : '',
             suggestionSrc: typeof data?.suggestion_src === 'string' ? data.suggestion_src : '',
             latencyMs: Date.now() - startedAt,
@@ -62,6 +80,7 @@ export async function askKnowledgeBase(params: {
         log.info('知识库返回', {
             inboxId: params.inboxId,
             brand,
+            platform: params.platform,
             confidence: Number(result.confidence.toFixed(3)),
             mode: result.mode,
             needsHuman: result.needsHuman,

@@ -108,6 +108,61 @@ describe('askKnowledgeBase', () => {
         await mod.askKnowledgeBase({ question: '测试', inboxId: 99 });
         expect(received[0].body.brand).toBeUndefined();
     });
+
+    it('把客户平台一并传给服务端（用于平台适用性判断）', async () => {
+        reply = {
+            status: 200,
+            body: { answer: '在 Shadowrocket 里添加订阅', confidence: 0.8, needs_human: false,
+                    platform: 'ios', mode: 'generated' },
+        };
+        received = [];
+        const r = await mod.askKnowledgeBase({
+            question: 'iOS 怎么用？', inboxId: 1, platform: 'iOS (iPhone)',
+        });
+        expect(received[0].body.platform).toBe('iOS (iPhone)');
+        expect(r?.platform).toBe('ios');
+    });
+
+    it('mode=clarify（服务端反问）原样透传', async () => {
+        reply = {
+            status: 200,
+            body: { answer: '麻烦补充一下您用的是哪个客户端？', confidence: 0.3,
+                    needs_human: false, mode: 'clarify',
+                    reason: '问题过于笼统，已自动反问客户端与截图' },
+        };
+        const r = await mod.askKnowledgeBase({ question: '还是不行', inboxId: 1 });
+        expect(r?.mode).toBe('clarify');
+        expect(r?.needsHuman).toBe(false);
+        expect(r?.answer).toContain('哪个客户端');
+    });
+});
+
+describe('shouldAutoReply', () => {
+    const base = { answer: 'x', confidence: 0.9, needsHuman: false } as const;
+
+    it('正常通过校验且置信度达标 → 自动外发', () => {
+        expect(mod.shouldAutoReply({ ...base }, 0.6)).toBe(true);
+    });
+
+    it('置信度不达标 → 不外发', () => {
+        expect(mod.shouldAutoReply({ ...base, confidence: 0.5 }, 0.6)).toBe(false);
+    });
+
+    it('被事实校验/平台校验拦下（needsHuman）→ 不外发，即使置信度很高', () => {
+        expect(mod.shouldAutoReply({ ...base, confidence: 0.99, needsHuman: true }, 0.6)).toBe(false);
+    });
+
+    it('mode=clarify（反问）→ 忽略置信度阈值，直接外发', () => {
+        expect(mod.shouldAutoReply(
+            { answer: '麻烦补充一下您用的是哪个客户端？', confidence: 0.2, needsHuman: false, mode: 'clarify' },
+            0.6,
+        )).toBe(true);
+    });
+
+    it('空答案一律不外发', () => {
+        expect(mod.shouldAutoReply({ ...base, answer: '' }, 0.6)).toBe(false);
+        expect(mod.shouldAutoReply({ answer: '', confidence: 0.1, needsHuman: false, mode: 'clarify' }, 0.6)).toBe(false);
+    });
 });
 
 describe('brandForInbox', () => {

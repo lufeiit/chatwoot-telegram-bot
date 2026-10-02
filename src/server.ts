@@ -7,7 +7,7 @@ import { saveMapping } from './database';
 import { createMessageWithinConversationLock, createPrivateNote, getInboxById, isSelfSentMessage, conversationMutex } from './chatwoot';
 import { createLogger, extractAxiosError } from './logger';
 import { findKeywordAutoReplyForInbox } from './keyword-auto-reply';
-import { askKnowledgeBase } from './knowledge';
+import { askKnowledgeBase, shouldAutoReply } from './knowledge';
 import { renderForwardedMessage, extractContactCard, extractSenderName, enrichChannelFromInbox } from './formatters';
 import { extractAttachments, sendAttachmentsSequentially } from './attachments';
 import {
@@ -149,18 +149,21 @@ async function handleKnowledgeFallback(params: {
     inboxId?: number;
     question: string;
     eventId?: number;
+    /** 客户平台（取自会话属性 browser.platform_name）：供知识库做平台适用性判断 */
+    platform?: string;
 }): Promise<void> {
-    const { conversationId, inboxId, question, eventId } = params;
+    const { conversationId, inboxId, question, eventId, platform } = params;
     try {
-        const result = await askKnowledgeBase({ question, inboxId });
+        const result = await askKnowledgeBase({ question, inboxId, platform });
         if (!result) return; // 未启用 / 调用失败：什么都不做
 
-        if (!result.needsHuman && result.answer && result.confidence >= config.ragMinConfidence) {
+        if (shouldAutoReply(result, config.ragMinConfidence)) {
             await createMessageWithinConversationLock(conversationId, result.answer);
             log.info('知识库自动回复已发送', {
                 conversationId,
                 inboxId,
                 mode: result.mode,
+                platform: result.platform ?? platform,
                 confidence: Number(result.confidence.toFixed(3)),
                 chatwootMessageId: eventId,
             });
@@ -220,6 +223,9 @@ export async function handleMessageCreated(event: ChatwootMessageEvent) {
         return;
     }
 
+    // 提前取出卡片信息：知识库回退需要客户平台（browser.platform_name）做平台适用性判断
+    const contactCard = extractContactCard(event);
+
     if (messageType === 'incoming' && event.content) {
         const inboxId = event?.conversation?.inbox_id ?? event?.inbox?.id;
         const matchedReply = config.autoReplies.length > 0
@@ -250,6 +256,7 @@ export async function handleMessageCreated(event: ChatwootMessageEvent) {
                 inboxId,
                 question: event.content,
                 eventId: event?.id,
+                platform: contactCard.platformName,
             });
         }
     }
@@ -257,7 +264,6 @@ export async function handleMessageCreated(event: ChatwootMessageEvent) {
     const attachments = extractAttachments(event);
     const messageContent = event?.content || (attachments.length > 0 ? '[附件]' : '[无内容]');
     const { name: senderName, email: senderEmail } = extractSenderName(event);
-    const contactCard = extractContactCard(event);
 
     // 渠道兜底：Chatwoot 载荷的 inbox 段只有 {id, name}（没有 channel_type），
     // 且事件里 conversation.channel 也可能缺失 —— 两者都取不到会显示「未知渠道」。
