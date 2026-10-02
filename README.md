@@ -64,10 +64,13 @@
 
 ### 第二步：服务器部署
 
-登录你的服务器，执行以下命令：
+> **无需克隆源码**：直接使用官方镜像 `ghcr.io/lufeiit/chatwoot-telegram-bot:latest`（同时支持 amd64 / arm64）。
+> 只有需要本地二次开发时，才改为从源码构建（见 compose 文件里的注释）。
+
+登录你的服务器，执行以下命令（部署目录只保存配置与数据）：
 
 ```bash
-# 1. 创建并进入项目目录
+# 1. 创建并进入部署目录
 mkdir -p /opt/chatwoot-telegram-bot && cd /opt/chatwoot-telegram-bot
 
 # 2. 创建数据目录
@@ -177,9 +180,10 @@ services:
       - .env
 ```
 
-启动服务：
+启动服务（首次会自动从 ghcr.io 拉取镜像，无需构建）：
 
 ```bash
+docker compose pull     # 拉取/更新镜像
 docker compose up -d
 
 # 检查日志，确认是否启动成功
@@ -197,6 +201,40 @@ docker compose logs -f bot
    - **Events**: 勾选 `message_created` 和 `conversation_status_changed`。
 5. 保存。
 6. （可选但推荐）保存后，Chatwoot 会生成一个 Webhook Secret。你可以将其复制，填入服务器的 `.env` 文件中的 `CHATWOOT_WEBHOOK_SECRET` 变量，然后执行 `docker compose restart bot`，以开启签名验证，防止恶意伪造请求。
+
+### ☁️ 对接 Chatwoot 官方云服务（app.chatwoot.com）
+
+本镜像与 Chatwoot **官方云版**完全兼容（用的是标准 REST API 与 Webhook 事件），不需要自建 Chatwoot：
+
+1. `.env` 中指到官方云（`https://app.chatwoot.com` 也正是默认值）：
+
+       CHATWOOT_BASE_URL=https://app.chatwoot.com
+       CHATWOOT_ACCESS_TOKEN=你的_Access_Token   # 后台：头像 → Profile Settings → Access Token
+       CHATWOOT_ACCOUNT_ID=1                     # 后台 URL 里的 /app/accounts/<ID>/
+
+2. 在官方云后台配置 Webhook（**必需**）：
+   - 进入 **设置 (Settings) → 集成 (Integrations) → Webhooks → Add new webhook**
+   - **URL**：`https://你的域名/webhook`（没有域名时可用 `http://服务器IP:3123/webhook`）
+   - **Events**：勾选 `message_created`（必需）与 `conversation_status_changed`（推荐，用于自动归档话题）
+   - 保存后把生成的 **Secret** 填入 `.env` 的 `CHATWOOT_WEBHOOK_SECRET`，再执行 `docker compose restart bot`
+3. 服务器需要**公网可达**（或 Nginx 反代 + 域名 + HTTPS），因为消息是 Chatwoot 主动推送过来的。
+
+#### ⚠️ 不启用 Webhook 时能做什么？
+
+本镜像**不会主动轮询** Chatwoot，消息与会话状态都靠 Webhook 推送触发，因此：
+
+| 功能 | 是否依赖 Webhook |
+|---|---|
+| Chatwoot 客户消息 → Telegram（话题 / 卡片） | ✅ 必需 |
+| 关键词自动回复（含按收件箱区分） | ✅ 必需（收到客户消息时触发） |
+| 会话状态变更同步（自动归档话题） | ✅ 需勾选 `conversation_status_changed` |
+| Telegram 回复消息 / 发图片到 Chatwoot | ⚠️ 依赖 Webhook（没有消息卡片就无从上文回复） |
+| `/canned` 预设回复、标记已解决 / 重新打开按钮、打字状态同步 | ⚠️ 同上（都在 Webhook 生成的话题卡片里操作） |
+| `/health` 健康检查接口 | ❌ 不需要 |
+
+**结论**：不配置 Webhook 时，服务能正常启动，但不会有任何业务动作（Telegram 端收不到客户消息，也就无从回复）。
+
+另外，**Webhook 签名验证可以不开启**：`CHATWOOT_WEBHOOK_SECRET` 留空时代码会放行所有请求（仅打一条告警）。但**强烈建议开启**，否则任何知道该地址的人都能伪造客户消息。
 
 ### ⚠️ 重要：Nginx 反向代理配置
 

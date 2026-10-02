@@ -1,11 +1,10 @@
 services:
   bot:
-    # 使用 GitHub Packages 镜像（推荐）
-    # 如需从源码构建，请将下一行注释掉，并取消注释 build: .
-    # image: ghcr.io/lufeiit/chatwoot-telegram-bot:latest
+    # 使用 GitHub Container Registry 官方镜像（推荐，无需源码；同时支持 amd64 / arm64）
+    image: ghcr.io/lufeiit/chatwoot-telegram-bot:latest
 
-    # 从源码构建（启用附件发送功能）
-    build: .
+    # 如需从源码自行构建（本地二次开发时）：注释掉上面的 image，改用下面一行
+    # build: .
 
     container_name: telegram-chatwoot-bot
     restart: unless-stopped
