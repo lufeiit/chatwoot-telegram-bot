@@ -56,9 +56,13 @@ jobs:
           done
 
       - name: 构建镜像
-        # 先构建后登录：即使注册表凭据缺失，也能确认镜像本身能否产出
+        # 先构建后登录：即使注册表凭据缺失，也能确认镜像本身能否产出。
+        # --provenance=false：BuildKit 默认会附加 provenance 证明，导致镜像索引里多出
+        # 一个 unknown/unknown 条目（对 docker pull 无害，但 manifest 不干净、老版本
+        # 客户端可能困惑）。GitHub 侧 build-push-action 同样设了 provenance: false。
         run: |
-          sudo docker build -t "$IMAGE:latest" -t "$IMAGE:${GITHUB_SHA::8}" .
+          sudo docker build --provenance=false \
+            -t "$IMAGE:latest" -t "$IMAGE:${GITHUB_SHA::8}" .
 
       - name: 冒烟测试（产物结构 + 语法）
         # 避免推出一个跑不起来的镜像：确认 dist 产物存在且 Node 能解析
