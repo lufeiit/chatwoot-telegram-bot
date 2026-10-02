@@ -5,7 +5,7 @@ import FormData from 'form-data';
 import { config } from './config';
 import { createLogger, extractAxiosError } from './logger';
 import { KeyedMutex } from './mutex';
-import type { CannedResponse, CustomAttributeDefinition, ChatwootContactDetail, ChatwootConversation } from './types';
+import type { CannedResponse, CustomAttributeDefinition, ChatwootContactDetail, ChatwootConversation, ChatwootMessageEvent } from './types';
 
 const log = createLogger('chatwoot');
 
@@ -334,4 +334,57 @@ export async function getCannedResponses(search?: string): Promise<CannedRespons
     log.debug('Fetched canned responses', { count: data.length, search });
     cannedCache = { data, key: cacheKey, ts: Date.now() };
     return data;
+}
+
+// ============ Polling Mode（无 Webhook 时的增量拉取） ============
+
+/**
+ * 兼容 Chatwoot 的多种列表响应包裹：
+ *   [ ... ] / { payload: [...] } / { data: { payload: [...] } }
+ */
+function extractListPayload<T>(data: unknown): T[] {
+    if (Array.isArray(data)) return data as T[];
+    const obj = data as { payload?: unknown; data?: { payload?: unknown } } | null;
+    if (Array.isArray(obj?.payload)) return obj.payload as T[];
+    if (Array.isArray(obj?.data?.payload)) return obj.data.payload as T[];
+    return [];
+}
+
+/**
+ * 拉取最近活跃的会话列表（按 last_activity_at 倒序，含所有状态）。
+ * 仅用于轮询模式：用来发现“有新消息或状态变化”的会话。
+ */
+export async function listRecentConversations(options: { page?: number } = {}): Promise<ChatwootConversation[]> {
+    return withRetry(async () => {
+        const accountId = config.chatwootAccountId;
+        const response = await client.get(`/api/v1/accounts/${accountId}/conversations`, {
+            params: {
+                sort_by: 'last_activity_at_desc',
+                assignee_type: 'all',
+                page: options.page ?? 1,
+            },
+        });
+        return extractListPayload<ChatwootConversation>(response.data);
+    }, 'listRecentConversations', 2);
+}
+
+/**
+ * 拉取会话消息，支持 after 增量（只返回 id 大于 after 的消息）。
+ * 不传 after 时返回该会话最近的若干条（Chatwoot 默认一页 20 条）。
+ */
+export async function listConversationMessages(
+    conversationId: number,
+    options: { after?: number; before?: number } = {},
+): Promise<ChatwootMessageEvent[]> {
+    return withRetry(async () => {
+        const accountId = config.chatwootAccountId;
+        const params: Record<string, unknown> = {};
+        if (options.after != null) params.after = options.after;
+        if (options.before != null) params.before = options.before;
+        const response = await client.get(
+            `/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`,
+            { params },
+        );
+        return extractListPayload<ChatwootMessageEvent>(response.data);
+    }, `listConversationMessages(${conversationId})`, 2);
 }

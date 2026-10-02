@@ -126,9 +126,22 @@ class Deduplicator {
 
 const dedup = new Deduplicator();
 
+/**
+ * 事件级去重（webhook 与轮询模式共用）。
+ * 返回 true 表示该事件已处理过，应跳过。
+ */
+export function isDuplicateEvent(eventType: string, eventId: number | string | undefined): boolean {
+    if (eventId == null || eventId === '') return false;
+    return dedup.isDuplicate(`${eventType}:${eventId}`);
+}
+
 // ============ Message Handling ============
 
-async function handleMessageCreated(event: ChatwootMessageEvent) {
+/**
+ * 处理 message_created 事件（webhook / 轮询共用）。
+ * @param event Chatwoot 消息事件
+ */
+export async function handleMessageCreated(event: ChatwootMessageEvent) {
     const messageType = event?.message_type;
     if (messageType !== 'incoming' && messageType !== 'outgoing') {
         log.debug('Skipping non-message event', { messageType, eventId: event?.id });
@@ -250,7 +263,11 @@ async function handleMessageCreated(event: ChatwootMessageEvent) {
     }
 }
 
-async function handleConversationStatusChanged(event: ChatwootConversationStatusEvent) {
+/**
+ * 处理 conversation_status_changed 事件（webhook / 轮询共用）。
+ * @param event Chatwoot 会话状态变更事件
+ */
+export async function handleConversationStatusChanged(event: ChatwootConversationStatusEvent) {
     const conversationId = event?.id || event?.conversation?.id;
     const status = event?.status;
     if (!conversationId) return;
@@ -290,9 +307,8 @@ app.post('/webhook', verifySignature, (req: RawBodyRequest, res: Response) => {
     if (eventType === 'message_created' && eventId) {
         // dedup 只对 message_created 生效；status 变更可能短时间内多次
         // 触发（resolve→reopen→resolve），不能用同 key 去重
-        const dedupKey = `${eventType}:${eventId}`;
-        if (dedup.isDuplicate(dedupKey)) {
-            log.debug('Duplicate webhook event skipped', { dedupKey });
+        if (isDuplicateEvent(eventType, eventId)) {
+            log.debug('Duplicate webhook event skipped', { eventType, eventId });
             return;
         }
     }

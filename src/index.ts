@@ -1,10 +1,13 @@
 import http from 'http';
-import { app } from './server';
+import { app, handleMessageCreated, handleConversationStatusChanged, isDuplicateEvent } from './server';
 import { bot } from './bot';
 import './bot'; // 确保 bot handlers 注册（callback router 在 import 时挂载）
 import { config } from './config';
-import { initDb as initDatabase, closeDb } from './database';
+import { initDb as initDatabase, closeDb, getPollState, savePollState } from './database';
+import { ChatwootPoller } from './poller';
+import { listRecentConversations, listConversationMessages } from './chatwoot';
 import { createLogger, closeLogger } from './logger';
+import { startEnvWatcher } from './env-watcher';
 
 const log = createLogger('main');
 const PORT = config.port;
@@ -39,6 +42,39 @@ async function start() {
         log.info(`Webhook server running on port ${PORT}`);
     });
 
+    // ============ 轮询模式（无 Webhook 时可选） ============
+    let poller: ChatwootPoller | undefined;
+    if (config.chatwootSyncMode !== 'webhook') {
+        poller = new ChatwootPoller(
+            {
+                accountId: Number(config.chatwootAccountId),
+                listConversations: () => listRecentConversations(),
+                listMessages: (conversationId, after) => listConversationMessages(conversationId, { after }),
+                getState: getPollState,
+                saveState: savePollState,
+                handleMessage: handleMessageCreated,
+                handleStatusChange: handleConversationStatusChanged,
+                isDuplicate: isDuplicateEvent,
+            },
+            {
+                intervalSeconds: config.pollIntervalSeconds,
+                maxConversations: config.pollMaxConversations,
+                forwardHistory: config.pollForwardHistory,
+            },
+        );
+        poller.start();
+        log.info('Chatwoot sync mode', {
+            mode: config.chatwootSyncMode,
+            intervalSeconds: config.pollIntervalSeconds,
+            maxConversations: config.pollMaxConversations,
+        });
+    } else {
+        log.info('Chatwoot sync mode', { mode: 'webhook' });
+    }
+
+    // ============ .env 关键词规则热加载（修改 .env 无需重启） ============
+    const stopEnvWatcher = startEnvWatcher();
+
     const SHUTDOWN_TIMEOUT_MS = 10_000;
     let shuttingDown = false;
 
@@ -54,6 +90,8 @@ async function start() {
         forceExit.unref();
 
         bot.stop(signal);
+        poller?.stop();
+        stopEnvWatcher();
 
         await new Promise<void>((resolve) => {
             server.close(() => {

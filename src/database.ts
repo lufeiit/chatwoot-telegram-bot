@@ -5,7 +5,7 @@ import { createLogger } from './logger';
 const log = createLogger('database');
 const db = new Database(config.dbPath);
 
-const CURRENT_DB_VERSION = 2;
+const CURRENT_DB_VERSION = 3;
 
 let insertMappingStmt: Database.Statement;
 let selectMappingStmt: Database.Statement;
@@ -13,6 +13,8 @@ let insertTopicStmt: Database.Statement;
 let selectTopicStmt: Database.Statement;
 let deleteTopicStmt: Database.Statement;
 let selectTopicByTopicIdStmt: Database.Statement;
+let selectPollStateStmt: Database.Statement;
+let upsertPollStateStmt: Database.Statement;
 
 function getDatabaseVersion(): number {
     try {
@@ -62,6 +64,18 @@ function migrateToVersion2(): void {
   `);
 }
 
+function migrateToVersion3(): void {
+    log.info('Migrating to v3: creating poll_state table (轮询模式断点)');
+    db.exec(`
+    CREATE TABLE IF NOT EXISTS poll_state (
+      chatwoot_conversation_id INTEGER PRIMARY KEY,
+      last_message_id INTEGER NOT NULL DEFAULT 0,
+      last_status TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+}
+
 function runMigrations(currentVersion: number): void {
     log.info(`Database version: ${currentVersion}, target: ${CURRENT_DB_VERSION}`);
 
@@ -78,6 +92,10 @@ function runMigrations(currentVersion: number): void {
         if (currentVersion < 2) {
             migrateToVersion2();
             setDatabaseVersion(2);
+        }
+        if (currentVersion < 3) {
+            migrateToVersion3();
+            setDatabaseVersion(3);
         }
     });
 
@@ -102,6 +120,12 @@ function initPreparedStatements(): void {
     selectTopicStmt = db.prepare('SELECT telegram_topic_id, topic_name, chatwoot_account_id FROM topics WHERE chatwoot_conversation_id = ?');
     deleteTopicStmt = db.prepare('DELETE FROM topics WHERE chatwoot_conversation_id = ?');
     selectTopicByTopicIdStmt = db.prepare('SELECT chatwoot_conversation_id, chatwoot_account_id, topic_name FROM topics WHERE telegram_topic_id = ?');
+
+    selectPollStateStmt = db.prepare('SELECT last_message_id, last_status FROM poll_state WHERE chatwoot_conversation_id = ?');
+    upsertPollStateStmt = db.prepare(
+        'INSERT INTO poll_state (chatwoot_conversation_id, last_message_id, last_status, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP) '
+        + 'ON CONFLICT(chatwoot_conversation_id) DO UPDATE SET last_message_id = excluded.last_message_id, last_status = excluded.last_status, updated_at = CURRENT_TIMESTAMP'
+    );
 }
 
 export function initDb() {
@@ -147,6 +171,25 @@ export function deleteTopic(conversationId: number) {
 
 export function getTopicByTopicId(telegramTopicId: number) {
     return selectTopicByTopicIdStmt.get(telegramTopicId) as { chatwoot_conversation_id: number; chatwoot_account_id?: number; topic_name: string } | undefined;
+}
+
+// ============ Poll State（轮询模式断点） ============
+
+export interface PollState {
+    /** 已处理的最大消息 ID（增量拉取的起点） */
+    lastMessageId: number;
+    /** 上次看到的会话状态（用于检测状态变更） */
+    lastStatus?: string;
+}
+
+export function getPollState(conversationId: number): PollState | undefined {
+    const row = selectPollStateStmt.get(conversationId) as { last_message_id: number; last_status?: string | null } | undefined;
+    if (!row) return undefined;
+    return { lastMessageId: row.last_message_id, lastStatus: row.last_status ?? undefined };
+}
+
+export function savePollState(conversationId: number, state: PollState): void {
+    upsertPollStateStmt.run(conversationId, state.lastMessageId, state.lastStatus ?? null);
 }
 
 // ============ Shutdown ============

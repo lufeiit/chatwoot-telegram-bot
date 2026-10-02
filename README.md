@@ -144,7 +144,13 @@ LOG_LEVEL=info
 | `CHATWOOT_BASE_URL` | ✅ | `https://app.chatwoot.com` | Chatwoot 后台地址（自动去尾斜杠） |
 | `CHATWOOT_ACCESS_TOKEN` | ✅ | — | Personal Access Token |
 | `CHATWOOT_ACCOUNT_ID` | ✅ | — | 账户 ID |
-| `CHATWOOT_WEBHOOK_SECRET` | ⭕ | — | Webhook 签名密钥（强烈推荐设置） |
+| `CHATWOOT_WEBHOOK_SECRET` | ⭕ | — | Webhook 签名密钥（Webhook 模式下强烈推荐设置） |
+| `CHATWOOT_SYNC_MODE` | ⭕ | `webhook` | 消息来源：`webhook` / `polling` / `both`（云版 Webhook 不可用时用 `polling`） |
+| `POLL_INTERVAL_SECONDS` | ⭕ | `10` | 轮询间隔（秒），仅 `polling` / `both` 生效 |
+| `POLL_MAX_CONVERSATIONS` | ⭕ | `20` | 每轮最多检查的会话数（控制 API 请求量） |
+| `POLL_FORWARD_HISTORY` | ⭕ | `false` | 首次遇到会话时是否转发历史消息（默认只记断点） |
+| `ENV_RELOAD_INTERVAL_SECONDS` | ⭕ | `5` | .env 热加载检测间隔（秒），`0` = 关闭 |
+| `ENV_FILE_PATH` | ⭕ | `.env` | 容器内 .env 路径（热加载用，需 compose 挂载） |
 | `KEYWORD_AUTO_REPLIES` | ⭕ | — | 自动回复规则：单引号包裹的 YAML 多行文本（不写 `inbox` = 通用；写 `inbox: <收件箱ID>` = 仅该收件箱生效）；兼容旧的单行 JSON |
 | `PORT` | ⭕ | `3000` | Webhook 监听端口 |
 | `LOG_LEVEL` | ⭕ | `info` | `debug` / `info` / `warn` / `error` |
@@ -219,22 +225,55 @@ docker compose logs -f bot
    - 保存后把生成的 **Secret** 填入 `.env` 的 `CHATWOOT_WEBHOOK_SECRET`，再执行 `docker compose restart bot`
 3. 服务器需要**公网可达**（或 Nginx 反代 + 域名 + HTTPS），因为消息是 Chatwoot 主动推送过来的。
 
-#### ⚠️ 不启用 Webhook 时能做什么？
+#### 🔄 两种消息来源模式：Webhook 与轮询
 
-本镜像**不会主动轮询** Chatwoot，消息与会话状态都靠 Webhook 推送触发，因此：
+| 模式 | 配置 | 实时性 | 适用场景 |
+|---|---|---|---|
+| `webhook`（默认） | 不设置，或 `CHATWOOT_SYNC_MODE=webhook` | 实时 | 自建 Chatwoot；或云版套餐含 Webhook |
+| `polling` | `CHATWOOT_SYNC_MODE=polling` | 秒级延迟（默认 10s） | **云版 Webhook 不可用/收费**时；无需公网可达地址 |
+| `both` | `CHATWOOT_SYNC_MODE=both` | 实时 | 双保险：Webhook + 轮询兜底（共享去重，不会重复转发） |
 
-| 功能 | 是否依赖 Webhook |
+轮询模式的可调参数：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `POLL_INTERVAL_SECONDS` | `10` | 轮询间隔（秒） |
+| `POLL_MAX_CONVERSATIONS` | `20` | 每轮最多检查的会话数 |
+| `POLL_FORWARD_HISTORY` | `false` | 首次遇到会话时是否转发历史消息（默认只记断点，避免刷屏）|
+
+**轮询原理**：定时拉取「最近活跃的会话列表」（1 次请求）→ 对每个会话按本地断点增量拉取（`messages?after=<上次消息ID>`）→ 新消息走与 Webhook **完全相同**的转发逻辑 → 断点存 SQLite（`poll_state` 表），重启不丢、天然去重；遇 `429` 自动指数退避（尊重 `Retry-After`）。
+
+请求量参考：10 秒间隔 × 20 个会话 ≈ 每分钟 120 次请求，远低于自建版默认的全局限流（3000 次/分钟/IP）。
+
+**轮询模式下不再需要**：公网可达地址、Nginx 反代、Chatwoot 后台的 Webhook 配置。
+
+#### ⚠️ 各功能的依赖情况
+
+| 功能 | 依赖 |
 |---|---|
-| Chatwoot 客户消息 → Telegram（话题 / 卡片） | ✅ 必需 |
-| 关键词自动回复（含按收件箱区分） | ✅ 必需（收到客户消息时触发） |
-| 会话状态变更同步（自动归档话题） | ✅ 需勾选 `conversation_status_changed` |
-| Telegram 回复消息 / 发图片到 Chatwoot | ⚠️ 依赖 Webhook（没有消息卡片就无从上文回复） |
-| `/canned` 预设回复、标记已解决 / 重新打开按钮、打字状态同步 | ⚠️ 同上（都在 Webhook 生成的话题卡片里操作） |
-| `/health` 健康检查接口 | ❌ 不需要 |
+| 客户消息 → Telegram（话题 / 卡片） | Webhook **或** 轮询皆可 |
+| 关键词自动回复（含按收件箱区分） | Webhook **或** 轮询皆可 |
+| 会话状态同步（自动归档 / 重开话题） | Webhook **或** 轮询皆可（轮询通过 `last_status` 比对检测） |
+| Telegram 回复 / 发图 / `/canned` / 按钮 / 打字状态 | 无需额外配置，但需先收到消息（即依赖上面任一模式） |
+| `/health` | 不需要 |
 
-**结论**：不配置 Webhook 时，服务能正常启动，但不会有任何业务动作（Telegram 端收不到客户消息，也就无从回复）。
+**注意**：若两种模式都未生效（默认 `webhook` 模式但未在 Chatwoot 配置 Webhook），服务会正常启动但不会有任何业务动作。
 
-另外，**Webhook 签名验证可以不开启**：`CHATWOOT_WEBHOOK_SECRET` 留空时代码会放行所有请求（仅打一条告警）。但**强烈建议开启**，否则任何知道该地址的人都能伪造客户消息。
+另外，**Webhook 签名验证可以不开启**：`CHATWOOT_WEBHOOK_SECRET` 留空时代码会放行所有请求（仅打一条告警）。但**强烈建议开启**，否则任何知道该地址的人都能伪造客户消息（轮询模式下该变量无意义）。
+
+#### 🔥 配置热加载（改关键词规则无需重启）
+
+默认的 `docker-compose.yml` 已把 `.env` 挂载进容器（`- ./.env:/app/.env:ro`），所以：
+
+1. 直接在服务器上编辑 `.env`，修改 `KEYWORD_AUTO_REPLIES`
+2. **无需重启**，默认 5 秒内自动生效（日志：`关键词规则已热加载（无需重启）`）
+3. 想立即生效也可以：`docker compose kill -s HUP bot`
+
+注意事项：
+
+- **仅关键词规则支持热加载**；其他变量（Token / 端口 / 同步模式 / 轮询间隔 / 日志级别等）修改后仍需 `docker compose restart bot`
+- 规则写错时**保留原规则**并打印错误日志，服务不会崩溃（可用 `docker compose logs -f bot` 查看）
+- `ENV_RELOAD_INTERVAL_SECONDS=0` 可关闭热加载；若未挂载 `.env`，热加载会静默跳过（不影响服务）
 
 ### ⚠️ 重要：Nginx 反向代理配置
 
