@@ -13,28 +13,32 @@ export function buildForumInlineKeyboard(conversationId: number, accountId: numb
     // r:/o: callback_data 末尾也带 contactId（可选第 4 段），
     // 这样点击「标记已解决」/「重新打开」后重建按钮时不丢失「刷新最新资料」按钮。
     const contactSuffix = contactId ? `:${contactId}` : '';
+    // 第二行固定为「查看 + 刷新」两个一行；无 contactId 时刷新按钮不存在，查看独占该行。
+    const secondRow: InlineKeyboardButton[] = [
+        { text: '📱 在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` },
+    ];
+    if (contactId) {
+        // 末尾带 conversationId（第 4 段），刷新时才能补拉会话维度字段
+        //（source_id / 渠道 / 浏览器 / IP / 发起时间…），与初始卡片对齐。
+        secondRow.push({ text: '🔄 刷新客户最新资料', callback_data: `c:${contactId}:${accountId}:${conversationId}` });
+    }
     const rows: InlineKeyboardButton[][] = [
         [
             { text: '✅ 标记已解决', callback_data: `r:${conversationId}:${accountId}${contactSuffix}` },
             { text: '🔓 重新打开', callback_data: `o:${conversationId}:${accountId}${contactSuffix}` },
         ],
-        [
-            { text: '📱 在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` },
-        ],
+        secondRow,
     ];
-    if (contactId) {
-        // 末尾带 conversationId（第 4 段），刷新时才能补拉会话维度字段
-        //（source_id / 渠道 / 浏览器 / IP / 发起时间…），与初始卡片对齐。
-        rows.push([{ text: '🔄 刷新客户最新资料', callback_data: `c:${contactId}:${accountId}:${conversationId}` }]);
-    }
     return { inline_keyboard: rows };
 }
 
 export function buildLegacyKeyboard(conversationId: number, accountId: number) {
     return {
         inline_keyboard: [
-            [{ text: '✅ 标记已解决', callback_data: 'resolve' }],
-            [{ text: '📱 在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` }],
+            [
+                { text: '✅ 标记已解决', callback_data: 'resolve' },
+                { text: '📱 在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` },
+            ],
         ],
     };
 }

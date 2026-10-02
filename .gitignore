@@ -4,3 +4,5 @@ dist
 .DS_Store
 mappings.db
 data/
+# 本地备份（含密钥，勿提交）
+.env.bak.*
