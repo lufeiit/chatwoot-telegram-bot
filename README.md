@@ -150,7 +150,7 @@ LOG_LEVEL=info
 | `POLL_MAX_CONVERSATIONS` | ⭕ | `20` | 每轮最多检查的会话数（控制 API 请求量） |
 | `POLL_FORWARD_HISTORY` | ⭕ | `false` | 首次遇到会话时是否转发历史消息（默认只记断点） |
 | `ENV_RELOAD_INTERVAL_SECONDS` | ⭕ | `5` | .env 热加载检测间隔（秒），`0` = 关闭 |
-| `ENV_FILE_PATH` | ⭕ | `.env` | 容器内 .env 路径（热加载用，需 compose 挂载） |
+| `ENV_FILE_PATH` | ⭕ | `.env` | 容器内 .env 路径（热加载用，默认 `/app/host/.env`，需 compose 目录挂载） |
 | `KEYWORD_AUTO_REPLIES` | ⭕ | — | 自动回复规则：单引号包裹的 YAML 多行文本（不写 `inbox` = 通用；写 `inbox: <收件箱ID>` = 仅该收件箱生效）；兼容旧的单行 JSON |
 | `PORT` | ⭕ | `3000` | Webhook 监听端口 |
 | `LOG_LEVEL` | ⭕ | `info` | `debug` / `info` / `warn` / `error` |
@@ -263,7 +263,8 @@ docker compose logs -f bot
 
 #### 🔥 配置热加载（改关键词规则无需重启）
 
-默认的 `docker-compose.yml` 已把 `.env` 挂载进容器（`- ./.env:/app/.env:ro`），所以：
+默认的 `docker-compose.yml` 已把**部署目录本身**以只读方式挂载进容器（`- ./:/app/host:ro`），并在
+`.env` 中设置 `ENV_FILE_PATH=/app/host/.env`，所以：
 
 1. 直接在服务器上编辑 `.env`，修改 `KEYWORD_AUTO_REPLIES`
 2. **无需重启**，默认 5 秒内自动生效（日志：`关键词规则已热加载（无需重启）`）
@@ -273,7 +274,13 @@ docker compose logs -f bot
 
 - **仅关键词规则支持热加载**；其他变量（Token / 端口 / 同步模式 / 轮询间隔 / 日志级别等）修改后仍需 `docker compose restart bot`
 - 规则写错时**保留原规则**并打印错误日志，服务不会崩溃（可用 `docker compose logs -f bot` 查看）
-- `ENV_RELOAD_INTERVAL_SECONDS=0` 可关闭热加载；若未挂载 `.env`，热加载会静默跳过（不影响服务）
+- `ENV_RELOAD_INTERVAL_SECONDS=0` 可关闭热加载；若未挂载，热加载会静默跳过（不影响服务）
+
+> **为什么挂目录而不是挂 `.env` 文件？**
+> Docker 的**文件**挂载是按 inode 绑定的：容器启动那一刻锁死 `.env` 的 inode。
+> 之后用 `mv` 或 `vim`（默认 `backupcopy=auto` 走 rename）覆盖 `.env`，会生成新 inode ——
+> 容器依旧读到旧内容，**热加载会静默失效、不报任何错**。
+> 挂目录则每次打开文件都重新解析路径，任何编辑器、任何写入方式都不会失联。
 
 ### ⚠️ 重要：Nginx 反向代理配置
 

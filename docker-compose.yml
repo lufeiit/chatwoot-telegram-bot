@@ -17,8 +17,10 @@ services:
     volumes:
       # 持久化 SQLite 数据库
       - ./data:/app/data
-      # 挂载 .env 本体：修改关键词规则后无需重启（热加载，见 README）
-      - ./.env:/app/.env:ro
+      # 以目录方式只读挂载本能目录：修改 .env 关键词规则后无需重启（热加载，见 README）。
+      # 不直接挂载 .env 文件，是因为 Docker 的文件挂载按 inode 绑定：
+      # 用 mv / vim 覆盖 .env 会换掉 inode，容器会静默读不到新内容。
+      - ./:/app/host:ro
 
     environment:
       # 环境变量也可以在这里直接设置，但推荐使用 .env 文件
