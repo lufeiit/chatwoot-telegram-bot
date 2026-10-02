@@ -112,8 +112,10 @@ describe('askKnowledgeBase', () => {
     it('把客户平台一并传给服务端（用于平台适用性判断）', async () => {
         reply = {
             status: 200,
-            body: { answer: '在 Shadowrocket 里添加订阅', confidence: 0.8, needs_human: false,
-                    platform: 'ios', mode: 'generated' },
+            body: {
+                answer: '在 Shadowrocket 里添加订阅', confidence: 0.8, needs_human: false,
+                platform: 'ios', mode: 'generated'
+            },
         };
         received = [];
         const r = await mod.askKnowledgeBase({
@@ -126,9 +128,11 @@ describe('askKnowledgeBase', () => {
     it('mode=clarify（服务端反问）原样透传', async () => {
         reply = {
             status: 200,
-            body: { answer: '麻烦补充一下您用的是哪个客户端？', confidence: 0.3,
-                    needs_human: false, mode: 'clarify',
-                    reason: '问题过于笼统，已自动反问客户端与截图' },
+            body: {
+                answer: '麻烦补充一下您用的是哪个客户端？', confidence: 0.3,
+                needs_human: false, mode: 'clarify',
+                reason: '问题过于笼统，已自动反问客户端与截图'
+            },
         };
         const r = await mod.askKnowledgeBase({ question: '还是不行', inboxId: 1 });
         expect(r?.mode).toBe('clarify');
