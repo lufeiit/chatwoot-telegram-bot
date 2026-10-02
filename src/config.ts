@@ -1,19 +1,31 @@
 import dotenv from 'dotenv';
 import { createLogger } from './logger';
-import { parseKeywordAutoReplies } from './keyword-auto-reply';
+import { parseKeywordAutoReplyList, type KeywordAutoReply } from './keyword-auto-reply';
 
 dotenv.config();
 
 const log = createLogger('config');
 
-function loadKeywordAutoReplies() {
+/**
+ * 加载关键词自动回复规则（全部配置都在 .env 中，不分文件）：
+ *   · 新写法：KEYWORD_AUTO_REPLIES 用单引号包裹的 YAML 多行文本，条目可带 inbox 限定收件箱
+ *   · 旧写法：单行 JSON，仍然兼容
+ */
+function loadAutoReplies(): KeywordAutoReply[] {
     try {
-        return parseKeywordAutoReplies(process.env.KEYWORD_AUTO_REPLIES);
+        const rules = parseKeywordAutoReplyList(process.env.KEYWORD_AUTO_REPLIES);
+        log.info('Loaded keyword auto replies', {
+            rules: rules.length,
+            inboxSpecific: rules.filter(rule => rule.inboxIds?.length).length,
+        });
+        return rules;
     } catch (error) {
         log.error('Invalid KEYWORD_AUTO_REPLIES configuration', { error: String(error) });
         process.exit(1);
     }
 }
+
+const autoReplies = loadAutoReplies();
 
 /** 解析布尔型环境变量，未设置或非真值返回 false */
 function envBool(name: string, defaultValue = false): boolean {
@@ -33,7 +45,10 @@ export const config = {
     chatwootBaseUrl: (process.env.CHATWOOT_BASE_URL || 'https://app.chatwoot.com').replace(/\/+$/, ''),
     chatwootAccountId: process.env.CHATWOOT_ACCOUNT_ID || '',
     chatwootWebhookSecret: process.env.CHATWOOT_WEBHOOK_SECRET || '',
-    keywordAutoReplies: loadKeywordAutoReplies(),
+    /** 关键词自动回复规则（默认通用；条目可带 inbox 限定收件箱） */
+    autoReplies,
+    /** @deprecated 兼容旧字段，与 autoReplies 相同 */
+    keywordAutoReplies: autoReplies,
     dbPath: process.env.DB_PATH || 'mappings.db',
 };
 

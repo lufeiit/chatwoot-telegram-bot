@@ -6,7 +6,7 @@ import { bot } from './bot-instance';
 import { saveMapping } from './database';
 import { createMessageWithinConversationLock, isSelfSentMessage, conversationMutex } from './chatwoot';
 import { createLogger, extractAxiosError } from './logger';
-import { findKeywordAutoReply } from './keyword-auto-reply';
+import { findKeywordAutoReplyForInbox } from './keyword-auto-reply';
 import { renderForwardedMessage, extractContactCard, extractSenderName } from './formatters';
 import { extractAttachments, sendAttachmentsSequentially } from './attachments';
 import {
@@ -154,13 +154,15 @@ async function handleMessageCreated(event: ChatwootMessageEvent) {
         return;
     }
 
-    if (messageType === 'incoming' && event.content && config.keywordAutoReplies.length > 0) {
-        const matchedReply = findKeywordAutoReply(event.content, config.keywordAutoReplies);
+    if (messageType === 'incoming' && event.content && config.autoReplies.length > 0) {
+        const inboxId = event?.conversation?.inbox_id ?? event?.inbox?.id;
+        const matchedReply = findKeywordAutoReplyForInbox(event.content, config.autoReplies, inboxId);
         if (matchedReply) {
             try {
                 await createMessageWithinConversationLock(conversationId, matchedReply.reply);
                 log.info('Keyword auto reply sent', {
                     conversationId,
+                    inboxId,
                     keywords: matchedReply.keywords,
                     chatwootMessageId: event?.id,
                 });
@@ -168,6 +170,7 @@ async function handleMessageCreated(event: ChatwootMessageEvent) {
                 // 自动回复失败不能影响原有的 Telegram 消息转发。
                 log.error('Failed to send keyword auto reply', {
                     conversationId,
+                    inboxId,
                     keywords: matchedReply.keywords,
                     ...extractAxiosError(error),
                 });
