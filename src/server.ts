@@ -4,11 +4,11 @@ import type { Request, Response, NextFunction } from 'express';
 import { config } from './config';
 import { bot } from './bot-instance';
 import { saveMapping } from './database';
-import { createMessageWithinConversationLock, createPrivateNote, isSelfSentMessage, conversationMutex } from './chatwoot';
+import { createMessageWithinConversationLock, createPrivateNote, getInboxById, isSelfSentMessage, conversationMutex } from './chatwoot';
 import { createLogger, extractAxiosError } from './logger';
 import { findKeywordAutoReplyForInbox } from './keyword-auto-reply';
 import { askKnowledgeBase } from './knowledge';
-import { renderForwardedMessage, extractContactCard, extractSenderName } from './formatters';
+import { renderForwardedMessage, extractContactCard, extractSenderName, enrichChannelFromInbox } from './formatters';
 import { extractAttachments, sendAttachmentsSequentially } from './attachments';
 import {
     getOrCreateTopic,
@@ -258,6 +258,17 @@ export async function handleMessageCreated(event: ChatwootMessageEvent) {
     const messageContent = event?.content || (attachments.length > 0 ? '[附件]' : '[无内容]');
     const { name: senderName, email: senderEmail } = extractSenderName(event);
     const contactCard = extractContactCard(event);
+
+    // 渠道兜底：Chatwoot 载荷的 inbox 段只有 {id, name}（没有 channel_type），
+    // 且事件里 conversation.channel 也可能缺失 —— 两者都取不到会显示「未知渠道」。
+    // 缺了就按 inbox_id 查一次收件箱列表（带缓存）补上；失败不影响主流程。
+    if (!contactCard.channel || !contactCard.inboxName) {
+        const inboxId = event?.inbox?.id ?? event?.conversation?.inbox_id;
+        enrichChannelFromInbox(contactCard, await getInboxById(inboxId));
+        if (!contactCard.channel || !contactCard.inboxName) {
+            log.debug('卡片渠道/收件箱名仍缺失（收件箱兜底未命中）', { inboxId, conversationId });
+        }
+    }
 
     log.info('Processing webhook message', {
         conversationId,

@@ -5,7 +5,7 @@ import FormData from 'form-data';
 import { config } from './config';
 import { createLogger, extractAxiosError } from './logger';
 import { KeyedMutex } from './mutex';
-import type { CannedResponse, CustomAttributeDefinition, ChatwootContactDetail, ChatwootConversation, ChatwootMessageEvent } from './types';
+import type { CannedResponse, CustomAttributeDefinition, ChatwootContactDetail, ChatwootConversation, ChatwootInbox, ChatwootMessageEvent } from './types';
 
 const log = createLogger('chatwoot');
 
@@ -308,6 +308,50 @@ export async function getConversation(conversationId: number): Promise<ChatwootC
         const body = response.data as { payload?: ChatwootConversation };
         return body.payload ?? (response.data as ChatwootConversation);
     }, `getConversation(${conversationId})`);
+}
+
+// ============ Inbox 列表（带缓存，用于补齐载荷里缺失的渠道） ============
+
+/**
+ * 为什么需要它：
+ *   Chatwoot webhook 载荷里的 inbox 段来自 `Inbox#webhook_data`，**只有 {id, name}**，
+ *   不含 channel_type（见 chatwoot 仓库 app/models/inbox.rb）；而事件里
+ *   `conversation.channel` 也可能缺失。两者都取不到时卡片会显示「未知渠道」，
+ *   但同一行的收件箱名却正常，很容易被误当成数据缺失。
+ *   这里按 inbox_id 查一次收件箱列表补齐，避免误导客服。
+ */
+const INBOX_CACHE_TTL_MS = 30 * 60 * 1000;
+let inboxCache: { data: ChatwootInbox[]; ts: number } | null = null;
+
+export async function listInboxes(forceRefresh = false): Promise<ChatwootInbox[]> {
+    if (!forceRefresh && inboxCache && Date.now() - inboxCache.ts < INBOX_CACHE_TTL_MS) {
+        return inboxCache.data;
+    }
+    const accountId = config.chatwootAccountId;
+    const url = `/api/v1/accounts/${accountId}/inboxes`;
+    const response = await withRetry(
+        () => client.get<{ payload?: ChatwootInbox[] } | ChatwootInbox[]>(url),
+        'listInboxes',
+    );
+    // Chatwoot v3 包了一层 payload，v2 直接返回数组
+    const body = response.data as { payload?: ChatwootInbox[] };
+    const payload = body.payload ?? (response.data as ChatwootInbox[]);
+    const data = Array.isArray(payload) ? payload : [];
+    inboxCache = { data, ts: Date.now() };
+    log.debug('收件箱列表已缓存', { count: data.length });
+    return data;
+}
+
+/** 按 ID 取收件箱（走缓存）。任何失败都返回 undefined，由调用方保持原样降级。 */
+export async function getInboxById(inboxId?: number): Promise<ChatwootInbox | undefined> {
+    if (!inboxId) return undefined;
+    try {
+        const inboxes = await listInboxes();
+        return inboxes.find(inbox => inbox.id === inboxId);
+    } catch (error) {
+        log.warn('拉取收件箱列表失败，渠道兜底跳过', { inboxId, ...extractAxiosError(error) });
+        return undefined;
+    }
 }
 
 // ============ Canned Responses (with short-lived cache) ============

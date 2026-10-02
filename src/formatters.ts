@@ -123,6 +123,20 @@ function channelLabel(channel?: string): string {
 }
 
 /**
+ * 载荷里渠道 / 收件箱名缺失时，用收件箱列表（API）的结果补齐，避免卡片出现「未知渠道」。
+ * 纯函数：只填空缺字段、不覆盖已有值；inbox 为空则原样返回。
+ */
+export function enrichChannelFromInbox(
+    info: ContactCardInfo,
+    inbox?: { name?: string; channel_type?: string } | null,
+): ContactCardInfo {
+    if (!inbox) return info;
+    if (!info.channel && inbox.channel_type) info.channel = inbox.channel_type;
+    if (!info.inboxName && inbox.name) info.inboxName = inbox.name;
+    return info;
+}
+
+/**
  * 把 BCP47/ISO-639-1 语言码翻译成中文显示名。
  * 与 Chatwoot UI 一致：Chatwoot 把 "zh" → "Chinese"，我们更进一步翻成中文。
  * 未识别的代码原样返回。
