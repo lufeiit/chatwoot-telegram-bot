@@ -1,0 +1,87 @@
+name: Build and Push Image (Gitea)
+
+# Gitea Actions 构建通道（内网），与 .github/workflows/docker-build.yml 的
+# GitHub Actions 构建并存。
+#
+# ⚠️ runner 标签 ubuntu-linux-x64 指向内网 Ubuntu 24.04 构建机（192.168.100.250），
+#    该 runner 为 host 模式且**未安装 Node.js** —— 使用 actions/checkout@v4 等 JS
+#    action 会报 `Cannot find: node in PATH` 而失败，因此一律改为 shell 步骤 +
+#    内网 git clone（同 chatwoot-rag / FlClash 工作流的做法）。
+# ⚠️ 构建机为 amd64，故这里只产出 **linux/amd64 单架构**镜像；
+#    多架构（amd64+arm64）仍由 GitHub Actions 的 buildx 负责。
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-linux-x64
+    env:
+      REGISTRY: 192.168.100.235:3000
+      IMAGE: 192.168.100.235:3000/lufeiit/chatwoot-telegram-bot
+    steps:
+      - name: Checkout（内网 clone，runner 无 node 不能用 actions/checkout）
+        run: |
+          git clone --depth 1 \
+            "http://lufeiit:${{ secrets.GITHUB_TOKEN }}@$REGISTRY/${{ github.repository }}.git" .
+          ls -la
+
+      - name: 环境检查
+        run: |
+          echo "runner: $(hostname)  arch: $(uname -m)"
+          # runner 守护进程启动早于 usermod -aG docker，当前会话不在 docker 组，
+          # 统一用 sudo（构建机上 lufei 免密 sudo 已启用），避免重启 runner。
+          sudo docker version --format 'Server {{.Server.Version}}' || {
+            echo "::error::runner 上没有可用的 docker，无法构建镜像"; exit 1; }
+          sudo docker info --format '{{json .RegistryConfig.Mirrors}}'
+
+      - name: 网络预检
+        # 构建机曾出现拉不到 Docker Hub（本 Dockerfile 基于 node:20-alpine）；
+        # 401/403 都算通（只是需要鉴权），000 才是不可达。
+        run: |
+          for u in "https://registry-1.docker.io/v2/" "http://$REGISTRY/v2/"; do
+            printf '  %-42s ' "$u"
+            curl -s -o /dev/null -w 'HTTP=%{http_code}  %{time_total}s\n' --max-time 8 "$u" || echo "不可达"
+          done
+
+      - name: 构建镜像
+        # 先构建后登录：即使注册表凭据缺失，也能确认镜像本身能否产出
+        run: |
+          sudo docker build -t "$IMAGE:latest" -t "$IMAGE:${GITHUB_SHA::8}" .
+
+      - name: 冒烟测试（产物结构 + 语法）
+        # 避免推出一个跑不起来的镜像：确认 dist 产物存在且 Node 能解析
+        run: |
+          sudo docker run --rm --entrypoint sh "$IMAGE:latest" -c \
+            'node --version && test -f dist/index.js && node --check dist/index.js && echo "dist/index.js 语法通过" && ls dist | head -8'
+
+      - name: 登录 Gitea 容器注册表
+        # 内置 GITHUB_TOKEN 不被容器注册表接受；REGISTRY_PAT 必须含 **package 写权限**，
+        # 否则 /v2/token 换取 Bearer 时返回 401（表现为 docker login unauthorized）。
+        # Gitea 保留 GITEA_ / GITHUB_ 前缀作密钥名，故不能命名为 GITEA_PAT。
+        run: echo "${{ secrets.REGISTRY_PAT }}" | sudo docker login "$REGISTRY" -u lufeiit --password-stdin
+
+      - name: 推送 Gitea 注册表（内网）
+        run: |
+          sudo docker push "$IMAGE:latest"
+          sudo docker push "$IMAGE:${GITHUB_SHA::8}"
+
+      - name: 汇总
+        run: |
+          {
+            echo "### 镜像已构建（Gitea 内网通道）"
+            echo "- \`$IMAGE:latest\`"
+            echo "- \`$IMAGE:${GITHUB_SHA::8}\`"
+            echo "- 架构：linux/amd64（runner 本地架构；多架构见 GitHub Actions）"
+          } >> "$GITHUB_STEP_SUMMARY"
